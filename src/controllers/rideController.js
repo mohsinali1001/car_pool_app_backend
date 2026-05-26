@@ -65,7 +65,7 @@ const postRide = async (req, res) => {
       cargoType, weightCapacity, truckSize,
     } = req.body;
 
-    const normalizedRideMode = String(rideMode || 'share').toLowerCase();
+    const rideMode = req.body.rideMode || req.body.tourType || 'share';
     if (!['share', 'solo'].includes(normalizedRideMode)) {
       return res.status(400).json({
         success: false,
