@@ -4,8 +4,6 @@ const { pushToUser } = require('../utils/notificationHelper');
 const { RIDE_STATUS, DEAL_STATUS, ACTIVE_DEAL_STATUSES } = require('../constants/statuses');
 
 const PLATFORM_FEE_PERCENT = 0.1;
-const ACTIVE_RIDE_STATUSES = new Set(['active', 'in_progress']);
-const ACTIVE_BOOKING_STATUSES = new Set(['pending', 'confirmed', 'started']);
 
 function generalPickupArea(address) {
   if (!address || typeof address !== 'string') return 'Along route';
@@ -21,12 +19,6 @@ function parseCoord(value) {
 
 function maskCaptainPhone(phone) {
   return '03**-*****';
-}
-
-function isUpcomingOrActiveDeparture(departureTime) {
-  const dt = Date.parse(departureTime || '');
-  if (!Number.isFinite(dt)) return true;
-  return dt >= Date.now() - 5 * 60 * 1000;
 }
 
 /** Apply seat delta inside a transaction; returns new available seat count. */
@@ -583,22 +575,10 @@ const getMyBookings = async (req, res) => {
     const bookings = [];
     for (const doc of snap.docs) {
       let deal = { id: doc.id, ...doc.data() };
-      if (
-        !ACTIVE_BOOKING_STATUSES.has((deal.status || '').toString().toLowerCase()) ||
-        !isUpcomingOrActiveDeparture(deal.ride?.departureTime || deal.departureTime)
-      ) {
-        continue;
-      }
       const phoneRevealed = deal.phoneRevealed === true;
       const fullCaptainPhone = deal.captainPhone || '';
       deal.captainPhone = phoneRevealed ? fullCaptainPhone : maskCaptainPhone(fullCaptainPhone);
       deal = await populateRide(deal);
-      if (
-        !ACTIVE_RIDE_STATUSES.has((deal.ride?.status || '').toString().toLowerCase()) &&
-        !isUpcomingOrActiveDeparture(deal.ride?.departureTime)
-      ) {
-        continue;
-      }
       bookings.push(deal);
     }
     return res.json({ success: true, bookings });
