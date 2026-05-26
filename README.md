@@ -1,6 +1,6 @@
 ---
 title: CarPool Backend
-emoji: car
+emoji: 🚗
 colorFrom: green
 colorTo: blue
 sdk: docker
