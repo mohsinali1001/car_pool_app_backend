@@ -4,6 +4,7 @@ const ALLOWED_USER_FIELDS = [
   'name',
   'phone',
   'role',
+  'gender',
   'cnic',
   'cnicFrontUrl',
   'cnicBackUrl',
@@ -15,6 +16,7 @@ const ALLOWED_USER_FIELDS = [
   'vehicleSeats',
   'city',
   'vehiclePhotoUrl',
+  'captainVehicleType',
   'emergencyContactName',
   'emergencyContactPhone',
   'captainVerificationStatus',
@@ -22,6 +24,13 @@ const ALLOWED_USER_FIELDS = [
 
 // Simple in-memory cache for profiles (5 seconds TTL)
 const userCache = new Map();
+
+function normalizeGender(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const gender = String(value).trim().toLowerCase();
+  if (gender === 'male' || gender === 'female') return gender;
+  return null;
+}
 
 function pickUpdates(body) {
   const updates = {};
@@ -50,6 +59,15 @@ async function ensureCaptainWallet(uid) {
 const syncUser = async (req, res) => {
   const { uid } = req.user;
   const body = req.body;
+  const incomingGender = normalizeGender(body.gender);
+
+  if (body.gender !== undefined && incomingGender === null) {
+    return res.status(400).json({
+      success: false,
+      error: 'gender must be male or female',
+      code: 'INVALID_GENDER',
+    });
+  }
 
   try {
     const userRef = db.collection('users').doc(uid);
@@ -68,8 +86,11 @@ const syncUser = async (req, res) => {
         name: body.name || req.user.name || '',
         phone: body.phone || '',
         role: userRole,
+        gender: incomingGender,
         isVerified: userRole === 'customer' || userRole === 'passenger',
-        captainVerificationStatus: isCaptain ? 'pending_verification' : null,
+        captainVerificationStatus:
+          body.captainVerificationStatus ||
+          (isCaptain ? 'pending_verification' : null),
         cnicFrontUrl: body.cnicFrontUrl || null,
         cnicBackUrl: body.cnicBackUrl || null,
         cnic: body.cnic || null,
@@ -81,6 +102,7 @@ const syncUser = async (req, res) => {
         vehicleSeats: body.vehicleSeats ? parseInt(body.vehicleSeats, 10) : null,
         city: body.city || null,
         vehiclePhotoUrl: body.vehiclePhotoUrl || null,
+        captainVehicleType: body.captainVehicleType || null,
         emergencyContactName: body.emergencyContactName || null,
         emergencyContactPhone: body.emergencyContactPhone || null,
         rating: 0.0,
@@ -104,6 +126,28 @@ const syncUser = async (req, res) => {
 
     // Update existing user
     const updates = pickUpdates(body);
+    const existing = snap.data() || {};
+    const existingStatus = existing.captainVerificationStatus;
+    const isStatusLocked =
+      existingStatus === 'pending_verification' || existingStatus === 'verified';
+
+    if (incomingGender) {
+      updates.gender = incomingGender;
+    }
+
+    if (isStatusLocked && updates.captainVerificationStatus !== undefined) {
+      delete updates.captainVerificationStatus;
+    }
+
+    const nextRole = updates.role || existing.role;
+    if (
+      nextRole === 'captain' &&
+      !isStatusLocked &&
+      (!existingStatus || String(existingStatus).trim() === '') &&
+      updates.captainVerificationStatus === undefined
+    ) {
+      updates.captainVerificationStatus = 'pending_verification';
+    }
     
     if (Object.keys(updates).length > 0) {
       if (updates.captainVerificationStatus === 'pending_verification') {
@@ -163,6 +207,15 @@ const getProfile = async (req, res) => {
 const updateProfile = async (req, res) => {
   const { uid } = req.user;
   const updates = pickUpdates(req.body);
+  const incomingGender = normalizeGender(req.body.gender);
+
+  if (req.body.gender !== undefined && incomingGender === null) {
+    return res.status(400).json({
+      success: false,
+      error: 'gender must be male or female',
+      code: 'INVALID_GENDER',
+    });
+  }
 
   try {
     const userRef = db.collection('users').doc(uid);
@@ -173,6 +226,29 @@ const updateProfile = async (req, res) => {
 
     if (Object.keys(updates).length === 0) {
       return res.json({ success: true, user: snap.data() });
+    }
+
+    const existing = snap.data() || {};
+    const existingStatus = existing.captainVerificationStatus;
+    const isStatusLocked =
+      existingStatus === 'pending_verification' || existingStatus === 'verified';
+
+    if (incomingGender) {
+      updates.gender = incomingGender;
+    }
+
+    if (isStatusLocked && updates.captainVerificationStatus !== undefined) {
+      delete updates.captainVerificationStatus;
+    }
+
+    const nextRole = updates.role || existing.role;
+    if (
+      nextRole === 'captain' &&
+      !isStatusLocked &&
+      (!existingStatus || String(existingStatus).trim() === '') &&
+      updates.captainVerificationStatus === undefined
+    ) {
+      updates.captainVerificationStatus = 'pending_verification';
     }
 
     if (updates.captainVerificationStatus === 'pending_verification') {

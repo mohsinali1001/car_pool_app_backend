@@ -1,5 +1,6 @@
 const { db } = require('../config/firebase');
 const { getBalance } = require('../utils/walletHelper');
+const { pushToUser } = require('../utils/notificationHelper');
 
 /**
  * 1. Post a new ride
@@ -59,8 +60,31 @@ const postRide = async (req, res) => {
       startLocation, endLocation,
       startLat, startLng, endLat, endLng,
       departureTime, totalSeats, suggestedFare,
-      rideType, acceptsDelivery, vehicleInfo,
+      rideType, vehicleType, rideMode, acceptsDelivery, vehicleInfo,
+      tourType, maxPassengers,
+      cargoType, weightCapacity, truckSize,
     } = req.body;
+
+    const normalizedRideMode = String(rideMode || 'share').toLowerCase();
+    if (!['share', 'solo'].includes(normalizedRideMode)) {
+      return res.status(400).json({
+        success: false,
+        error: 'rideMode must be share or solo',
+        code: 'INVALID_RIDE_MODE',
+      });
+    }
+
+    const normalizedVehicleType = String(vehicleType || '').toLowerCase();
+    const allowedVehicleTypes = ['car', 'bike', 'bus', 'truck', 'shazore', 'tour'];
+    const inferredVehicleType = normalizedVehicleType ||
+      (rideType === 'tour' ? 'tour' : 'car');
+    if (!allowedVehicleTypes.includes(inferredVehicleType)) {
+      return res.status(400).json({
+        success: false,
+        error: 'vehicleType must be one of car, bike, bus, truck, shazore, tour',
+        code: 'INVALID_VEHICLE_TYPE',
+      });
+    }
 
     // Validation
     if (!startLocation || !endLocation || !departureTime || !totalSeats || !suggestedFare) {
@@ -75,7 +99,9 @@ const postRide = async (req, res) => {
     const ride = {
       captainId: uid,
       captainName: userData.name || 'Anonymous',
+      captainPhone: userData.phone || '',
       captainRating: userData.rating || 5.0,
+      captainGender: (userData.gender || '').toString().toLowerCase() || null,
       startLocation: startLocation.trim(),
       endLocation: endLocation.trim(),
       startLat: parseFloat(startLat) || 0.0,
@@ -83,11 +109,15 @@ const postRide = async (req, res) => {
       endLat: parseFloat(endLat) || 0.0,
       endLng: parseFloat(endLng) || 0.0,
       departureTime: new Date(departureTime).toISOString(),
-      totalSeats: parseInt(totalSeats),
-      availableSeats: parseInt(totalSeats),
+      totalSeats: normalizedRideMode === 'solo' ? 1 : parseInt(totalSeats),
+      availableSeats: normalizedRideMode === 'solo' ? 1 : parseInt(totalSeats),
       full: false,
       suggestedFare: parseFloat(suggestedFare),
       rideType: rideType || 'random',
+      rideMode: normalizedRideMode,
+      vehicleType: inferredVehicleType === 'shazore' ? 'truck' : inferredVehicleType,
+      isShazoreRide: inferredVehicleType === 'shazore',
+      isLadiesRide: ((userData.gender || '').toString().toLowerCase() === 'female'),
       acceptsDelivery: acceptsDelivery || false,
       vehicleInfo: vehicleInfo || `${userData.vehicleMake || ''} ${userData.vehicleModel || ''}`.trim() || 'Not Specified',
       status: 'active',
@@ -95,8 +125,79 @@ const postRide = async (req, res) => {
       updatedAt: new Date().toISOString(),
     };
 
+    if (inferredVehicleType === 'tour') {
+      const normalizedTourType = String(tourType || 'share').toLowerCase();
+      if (!['share', 'solo'].includes(normalizedTourType)) {
+        return res.status(400).json({
+          success: false,
+          error: "tourType must be 'share' or 'solo'",
+          code: 'INVALID_TOUR_TYPE',
+        });
+      }
+      ride.tourType = normalizedTourType;
+      if (normalizedTourType === 'share') {
+        const parsedMax = parseInt(maxPassengers, 10);
+        if (!Number.isInteger(parsedMax) || parsedMax < 1) {
+          return res.status(400).json({
+            success: false,
+            error: 'maxPassengers is required for share tour',
+            code: 'INVALID_MAX_PASSENGERS',
+          });
+        }
+        ride.maxPassengers = parsedMax;
+      } else {
+        ride.maxPassengers = 1;
+      }
+    }
+
+    if (inferredVehicleType === 'truck' || inferredVehicleType === 'shazore') {
+      const normalizedTruckSize = String(truckSize || '').toLowerCase();
+      if (normalizedTruckSize && !['mini', 'half', 'full'].includes(normalizedTruckSize)) {
+        return res.status(400).json({
+          success: false,
+          error: "truckSize must be mini, half, or full",
+          code: 'INVALID_TRUCK_SIZE',
+        });
+      }
+      ride.cargoType = (cargoType || '').toString().trim() || null;
+      ride.weightCapacity = weightCapacity != null ? Number(weightCapacity) : null;
+      ride.truckSize =
+        normalizedTruckSize || (inferredVehicleType === 'shazore' ? 'full' : null);
+      if (inferredVehicleType === 'shazore') {
+        ride.isShazoreRide = true;
+      }
+    }
+
     // Database mein add karna
     const ref = await db.collection('rides').add(ride);
+
+    // Notify nearby customers/passengers (city-filtered when captain city exists)
+    try {
+      const usersSnap = await db
+        .collection('users')
+        .where('role', 'in', ['customer', 'passenger'])
+        .get();
+      const captainCity = (userData.city || '').toString().trim().toLowerCase();
+      const targets = usersSnap.docs.filter((doc) => {
+        const u = doc.data() || {};
+        if (!u.fcmToken) return false;
+        if (!captainCity) return true;
+        return (u.city || '').toString().trim().toLowerCase() === captainCity;
+      });
+
+      await Promise.all(
+        targets.map((doc) =>
+          pushToUser(doc.id, {
+            title: 'New Ride Available',
+            body: `New ride from ${ride.startLocation} to ${ride.endLocation} near you!`,
+            type: 'new_ride',
+            data: { rideId: ref.id, screen: 'find-ride' },
+          }),
+        ),
+      );
+    } catch (notifyErr) {
+      console.error('Ride notification error:', notifyErr.message);
+    }
 
     // Success Response
     return res.status(201).json({
@@ -120,9 +221,17 @@ const postRide = async (req, res) => {
  * 2. Get Active Rides (With Advanced Filtering - No Index Required)
  */
 const getActiveRides = async (req, res) => {
-  const { rideType, startLocation } = req.query;
+  const { rideType, startLocation, rideMode } = req.query;
 
   try {
+    let requesterGender = '';
+    if (req.user?.uid) {
+      const requesterDoc = await db.collection('users').doc(req.user.uid).get();
+      if (requesterDoc.exists) {
+        requesterGender = (requesterDoc.data().gender || '').toString().toLowerCase();
+      }
+    }
+
     // Simple query without complex filters to avoid index requirement
     let query = db.collection('rides').where('status', '==', 'active');
     
@@ -133,9 +242,31 @@ const getActiveRides = async (req, res) => {
     const snap = await query.orderBy('departureTime').get();
     let rides = snap.docs.map(d => ({ id: d.id, ...d.data() }));
 
-    // Manual filtering for rideType (avoids composite index)
-    if (rideType && rideType !== 'all' && rideType !== 'random') {
-      rides = rides.filter(r => r.rideType === rideType);
+    // Manual filtering for vehicle/lady tabs (avoids composite index)
+    if (rideType) {
+      const rt = String(rideType).toLowerCase();
+      if (['car', 'bike', 'bus', 'truck', 'tour'].includes(rt)) {
+        rides = rides.filter((r) => (r.vehicleType || '').toString().toLowerCase() === rt);
+      } else if (rt === 'shazore') {
+        rides = rides.filter((r) => r.isShazoreRide === true);
+      } else if (rt === 'ladies') {
+        if (requesterGender !== 'female') {
+          rides = [];
+        } else {
+          rides = rides.filter((r) => r.isLadiesRide === true);
+        }
+      } else if (rt !== 'all' && rt !== 'random') {
+        rides = rides.filter((r) => (r.rideType || '').toString().toLowerCase() === rt);
+      }
+    }
+
+    if (rideMode) {
+      const rm = String(rideMode).toLowerCase();
+      if (['solo', 'share'].includes(rm)) {
+        rides = rides.filter(
+          (r) => (r.rideMode || 'share').toString().toLowerCase() === rm,
+        );
+      }
     }
 
     // Manual filtering for location search (case-insensitive)
@@ -336,5 +467,24 @@ module.exports = {
   updateRideStatus,
   getMyRides,
   getRideById,
-  updateRideLocation
+  updateRideLocation,
 };
+    const normalizedRideMode = String(rideMode || 'share').toLowerCase();
+    if (!['solo', 'share'].includes(normalizedRideMode)) {
+      return res.status(400).json({
+        success: false,
+        error: "rideMode must be 'solo' or 'share'",
+        code: 'INVALID_RIDE_MODE',
+      });
+    }
+    const captainVehicleType = String(userData.captainVehicleType || '').toLowerCase();
+    if (captainVehicleType) {
+      const postingType = inferredVehicleType === 'shazore' ? 'shazore' : inferredVehicleType;
+      if (postingType !== captainVehicleType) {
+        return res.status(403).json({
+          success: false,
+          error: `You can only post ${captainVehicleType} rides from this captain profile`,
+          code: 'VEHICLE_TYPE_MISMATCH',
+        });
+      }
+    }

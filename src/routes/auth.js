@@ -23,6 +23,7 @@ router.patch('/profile/captain', verifyToken, async (req, res) => {
   const { db } = require('../config/firebase');
   const { 
     phone, 
+    gender,
     captainVerificationStatus, 
     cnicFrontUrl, 
     cnicBackUrl,
@@ -30,6 +31,7 @@ router.patch('/profile/captain', verifyToken, async (req, res) => {
     city,
     vehicleMake,
     vehicleModel,
+    captainVehicleType,
     vehicleColor,
     vehicleRegistration,
     vehicleYear,
@@ -39,15 +41,33 @@ router.patch('/profile/captain', verifyToken, async (req, res) => {
   } = req.body;
 
   try {
+    const genderValue = gender == null ? null : String(gender).trim().toLowerCase();
+    if (gender !== undefined && !['male', 'female'].includes(genderValue)) {
+      return res.status(400).json({
+        success: false,
+        error: 'gender must be male or female',
+        code: 'INVALID_GENDER',
+      });
+    }
+
+    const userRef = db.collection('users').doc(req.user.uid);
+    const userSnap = await userRef.get();
+    const existingStatus = userSnap.exists ? userSnap.data().captainVerificationStatus : null;
+    const lockedStatus =
+      existingStatus === 'pending_verification' || existingStatus === 'verified';
+
     const updateData = {
       phone: phone || '',
-      captainVerificationStatus: captainVerificationStatus || 'pending_verification',
+      captainVerificationStatus: lockedStatus
+        ? existingStatus
+        : (captainVerificationStatus || existingStatus || 'pending_verification'),
       cnicFrontUrl: cnicFrontUrl || null,
       cnicBackUrl: cnicBackUrl || null,
       cnic: cnic || null,
       city: city || null,
       vehicleMake: vehicleMake || null,
       vehicleModel: vehicleModel || null,
+      captainVehicleType: normalizedCaptainVehicleType || null,
       vehicleColor: vehicleColor || null,
       vehicleRegistration: vehicleRegistration || null,
       vehicleYear: vehicleYear || null,
@@ -64,8 +84,11 @@ router.patch('/profile/captain', verifyToken, async (req, res) => {
         delete updateData[key];
       }
     });
+    if (gender !== undefined) {
+      updateData.gender = genderValue;
+    }
 
-    await db.collection('users').doc(req.user.uid).update(updateData);
+    await userRef.update(updateData);
 
     return res.json({ 
       success: true, 
@@ -97,3 +120,16 @@ router.patch('/profile', verifyToken, async (req, res) => {
 });
 
 module.exports = router;
+    const normalizedCaptainVehicleType = captainVehicleType == null
+      ? null
+      : String(captainVehicleType).trim().toLowerCase();
+    if (
+      captainVehicleType !== undefined &&
+      !['car', 'bike', 'bus', 'truck', 'shazore', 'tour'].includes(normalizedCaptainVehicleType)
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: 'captainVehicleType must be one of car, bike, bus, truck, shazore, tour',
+        code: 'INVALID_CAPTAIN_VEHICLE_TYPE',
+      });
+    }

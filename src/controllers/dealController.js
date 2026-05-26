@@ -17,6 +17,10 @@ function parseCoord(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+function maskCaptainPhone(phone) {
+  return '03**-*****';
+}
+
 /** Apply seat delta inside a transaction; returns new available seat count. */
 function seatUpdateFromRide(ride, delta) {
   const totalSeats = ride.totalSeats ?? ride.availableSeats ?? 0;
@@ -150,6 +154,13 @@ const createDeal = async (req, res) => {
     const rideRef = db.collection('rides').doc(rideId);
     const dealRef = db.collection('deals').doc();
     const platformFee = parseFloat(agreedFare) * PLATFORM_FEE_PERCENT;
+    const captainDoc = await rideRef.get();
+    if (!captainDoc.exists) {
+      return res.status(404).json({ success: false, error: 'Ride not found', code: 'RIDE_NOT_FOUND' });
+    }
+    const captainId = captainDoc.data().captainId;
+    const captainUserDoc = await db.collection('users').doc(captainId).get();
+    const captainPhone = captainUserDoc.exists ? (captainUserDoc.data().phone || '') : '';
 
     const dealData = await db.runTransaction(async (t) => {
       const ride = await t.get(rideRef);
@@ -176,6 +187,8 @@ const createDeal = async (req, res) => {
         customerId: uid,
         customerName: userDoc.data().name || 'Guest',
         customerPhone: userDoc.data().phone || '',
+        captainPhone,
+        phoneRevealed: false,
         agreedFare: parseFloat(agreedFare),
         platformFee,
         status: DEAL_STATUS.PENDING,
@@ -199,10 +212,10 @@ const createDeal = async (req, res) => {
     });
 
     await pushToUser(dealData.captainId, {
-      title: 'New ride request',
-      body: `${dealData.customerName} requested Rs. ${dealData.agreedFare}`,
+      title: 'New Booking Request!',
+      body: `${dealData.customerName} wants to ride with you. Tap to respond.`,
       type: 'new_deal',
-      data: { rideId, dealId: dealRef.id },
+      data: { rideId, dealId: dealRef.id, screen: 'my-rides' },
     });
 
     return res.status(201).json({ success: true, dealId: dealRef.id, deal: dealData });
@@ -229,43 +242,48 @@ const confirmDeal = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Deal already processed', code: 'INVALID_STATE' });
     }
 
-    const rideRef = db.collection('rides').doc(deal.rideId);
-    const platformFee = deal.platformFee;
+    const commission = parseFloat(deal.agreedFare || 0) * 0.1;
+    const walletRef = db.collection('wallets').doc(uid);
+    const walletSnap = await walletRef.get();
+    const currentBalance = walletSnap.exists ? Number(walletSnap.data().balance || 0) : 0;
 
-    await deductBalance(uid, platformFee, {
-      type: 'commission_deduction',
-      description: '10% commission for confirmed booking',
-      dealId,
+    if (currentBalance < commission) {
+      return res.status(400).json({
+        success: false,
+        code: 'INSUFFICIENT_BALANCE',
+        error: 'Insufficient wallet balance to confirm deal',
+        required: commission,
+        current: currentBalance,
+      });
+    }
+
+    const newBalance = currentBalance - commission;
+    const now = new Date().toISOString();
+
+    await walletRef.set(
+      {
+        id: uid,
+        userId: uid,
+        balance: newBalance,
+        updatedAt: now,
+      },
+      { merge: true },
+    );
+
+    await db.collection('transactions').add({
+      walletId: uid,
+      type: 'commission',
+      amount: -commission,
+      reference: dealId,
+      description: `10% commission for deal ${dealId}`,
+      createdAt: now,
     });
 
-    const confirmedSnap = await db
-      .collection('deals')
-      .where('rideId', '==', deal.rideId)
-      .where('status', '==', DEAL_STATUS.CONFIRMED)
-      .get();
-    const pickupOrder = confirmedSnap.size + 1;
-
-    await db.runTransaction(async (t) => {
-      const rideDoc = await t.get(rideRef);
-      if (!rideDoc.exists) throw new Error('Ride not found');
-      const ride = rideDoc.data();
-      if (ride.full === true || (ride.availableSeats || 0) <= 0) {
-        throw new Error('Ride is full');
-      }
-      const { available: newSeats } = seatUpdateFromRide(ride, -1);
-
-      t.update(dealRef, {
-        status: DEAL_STATUS.CONFIRMED,
-        confirmedAt: new Date().toISOString(),
-        boardingStatus: 'waiting',
-        pickupOrder,
-      });
-      t.update(rideRef, {
-        availableSeats: newSeats,
-        full: newSeats <= 0,
-        status: newSeats <= 0 ? RIDE_STATUS.FILLED : RIDE_STATUS.ACTIVE,
-        updatedAt: new Date().toISOString(),
-      });
+    await dealRef.update({
+      status: DEAL_STATUS.CONFIRMED,
+      phoneRevealed: true,
+      confirmedAt: now,
+      updatedAt: now,
     });
 
     await pushToUser(deal.customerId, {
@@ -275,7 +293,12 @@ const confirmDeal = async (req, res) => {
       data: { dealId },
     });
 
-    return res.json({ success: true, message: 'Deal confirmed' });
+    return res.json({
+      success: true,
+      message: 'Deal confirmed',
+      commissionDeducted: commission,
+      newBalance,
+    });
   } catch (err) {
     return res.status(400).json({ success: false, error: err.message, code: 'CONFIRM_DEAL_ERROR' });
   }
@@ -469,10 +492,13 @@ const getDeal = async (req, res) => {
 
     if (deal.captainId) {
       const captain = await db.collection('users').doc(deal.captainId).get();
+      const phoneRevealed = deal.phoneRevealed === true;
+      const fullCaptainPhone = deal.captainPhone || (captain.exists ? captain.data().phone : '');
+      deal.captainPhone = phoneRevealed ? fullCaptainPhone : maskCaptainPhone(fullCaptainPhone);
       if (captain.exists) {
         deal.captain = {
           name: captain.data().name,
-          phone: captain.data().phone,
+          phone: deal.captainPhone,
           rating: captain.data().rating,
           vehicleMake: captain.data().vehicleMake,
           vehicleModel: captain.data().vehicleModel,
@@ -549,6 +575,9 @@ const getMyBookings = async (req, res) => {
     const bookings = [];
     for (const doc of snap.docs) {
       let deal = { id: doc.id, ...doc.data() };
+      const phoneRevealed = deal.phoneRevealed === true;
+      const fullCaptainPhone = deal.captainPhone || '';
+      deal.captainPhone = phoneRevealed ? fullCaptainPhone : maskCaptainPhone(fullCaptainPhone);
       deal = await populateRide(deal);
       bookings.push(deal);
     }
@@ -702,6 +731,9 @@ const getRideDeals = async (req, res) => {
     const deals = [];
     for (const doc of snap.docs) {
       const deal = { id: doc.id, ...doc.data() };
+      const phoneRevealed = deal.phoneRevealed === true;
+      const fullCaptainPhone = deal.captainPhone || '';
+      deal.captainPhone = phoneRevealed ? fullCaptainPhone : maskCaptainPhone(fullCaptainPhone);
       if (deal.customerId) {
         const customer = await db.collection('users').doc(deal.customerId).get();
         if (customer.exists) {
