@@ -1,4 +1,3 @@
-app.set('trust proxy', 1);
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -22,6 +21,9 @@ const walletRoutes = require('./routes/wallet');
 const notificationRoutes = require('./routes/notifications');
 
 const app = express();
+
+// Trust proxy (MUST be after app initialization)
+app.set('trust proxy', 1);
 
 // Security Middlewares
 app.use(helmet());
