@@ -1,3 +1,4 @@
+
 const router = require('express').Router();
 const { verifyToken, requireCaptain } = require('../middleware/auth');
 const { syncUser, getProfile, updateProfile, updateFcmToken } = require('../controllers/authController');
