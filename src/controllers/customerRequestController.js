@@ -13,6 +13,21 @@ function distanceScore(aLat, aLng, bLat, bLng) {
   return dLat * dLat + dLng * dLng;
 }
 
+function distanceKm(aLat, aLng, bLat, bLng) {
+  if ([aLat, aLng, bLat, bLng].some((v) => v == null)) return null;
+  const toRad = (value) => (value * Math.PI) / 180;
+  const earthKm = 6371;
+  const dLat = toRad(bLat - aLat);
+  const dLng = toRad(bLng - aLng);
+  const lat1 = toRad(aLat);
+  const lat2 = toRad(bLat);
+  const h =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1) * Math.cos(lat2) *
+      Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return earthKm * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
 async function attachOffers(request) {
   const snap = await db
     .collection('customerRideOffers')
@@ -35,6 +50,10 @@ const createCustomerRequest = async (req, res) => {
     requestedAt,
     startLat,
     startLng,
+    endLat,
+    endLng,
+    customerLat,
+    customerLng,
     city,
   } = req.body;
 
@@ -83,6 +102,10 @@ const createCustomerRequest = async (req, res) => {
       customerPhoneRevealed: false,
       startLat: parseNumber(startLat),
       startLng: parseNumber(startLng),
+      endLat: parseNumber(endLat),
+      endLng: parseNumber(endLng),
+      customerLat: parseNumber(customerLat),
+      customerLng: parseNumber(customerLng),
       city: (city || user.city || '').toString().trim(),
       status: 'open',
       createdAt: now,
@@ -93,12 +116,9 @@ const createCustomerRequest = async (req, res) => {
 
     try {
       const captainsSnap = await db.collection('users').where('role', '==', 'captain').get();
-      const requestCity = request.city.toLowerCase();
       const targets = captainsSnap.docs.filter((doc) => {
         const captain = doc.data() || {};
-        if (!captain.fcmToken) return false;
-        if (!requestCity) return true;
-        return (captain.city || '').toString().trim().toLowerCase() === requestCity;
+        return Boolean(captain.fcmToken);
       });
       await Promise.all(targets.map((doc) =>
         pushToUser(doc.id, {
@@ -136,9 +156,16 @@ const getOpenCustomerRequests = async (req, res) => {
       .limit(50)
       .get();
 
-    let requests = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    let requests = snap.docs.map((d) => {
+      const request = { id: d.id, ...d.data() };
+      const km = distanceKm(captainLat, captainLng, request.startLat, request.startLng);
+      request.distanceKm = km == null ? null : Number(km.toFixed(2));
+      request.isNearby = km != null && km <= 10;
+      return request;
+    });
     requests = requests.filter((r) => r.status !== 'accepted' || r.acceptedCaptainId === uid);
     requests.sort((a, b) => {
+      if (a.isNearby !== b.isNearby) return a.isNearby ? -1 : 1;
       const byDistance = distanceScore(captainLat, captainLng, a.startLat, a.startLng) -
         distanceScore(captainLat, captainLng, b.startLat, b.startLng);
       if (byDistance !== 0) return byDistance;
@@ -159,10 +186,9 @@ const getMyCustomerRequests = async (req, res) => {
       .orderBy('createdAt', 'desc')
       .limit(25)
       .get();
-    const requests = [];
-    for (const doc of snap.docs) {
-      requests.push(await attachOffers({ id: doc.id, ...doc.data() }));
-    }
+    const requests = await Promise.all(
+      snap.docs.map((doc) => attachOffers({ id: doc.id, ...doc.data() })),
+    );
     return res.json({ success: true, requests });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message, code: 'GET_MY_CUSTOMER_REQUESTS_ERROR' });
