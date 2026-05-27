@@ -19,6 +19,7 @@ const rideRoutes = require('./routes/rides');
 const dealRoutes = require('./routes/deals');
 const walletRoutes = require('./routes/wallet');
 const notificationRoutes = require('./routes/notifications');
+const customerRequestRoutes = require('./routes/customerRequests');
 
 const app = express();
 
@@ -36,6 +37,7 @@ app.use(express.json({ limit: '10kb' })); // Anti-DOS payload limit
 app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/rides', rideLimiter, rideRoutes);
 app.use('/api/deals', dealLimiter, dealRoutes);
+app.use('/api/customer-requests', dealLimiter, customerRequestRoutes);
 app.use('/api/wallet', walletLimiter, walletRoutes);
 app.use('/api/notifications', notificationRoutes);
 

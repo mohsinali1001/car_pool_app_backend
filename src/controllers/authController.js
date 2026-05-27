@@ -1,4 +1,5 @@
 const { db } = require('../config/firebase');
+const { CAPTAIN_STARTER_BALANCE } = require('../utils/walletHelper');
 
 const ALLOWED_USER_FIELDS = [
   'name',
@@ -49,10 +50,25 @@ async function ensureCaptainWallet(uid) {
     await walletRef.set({
       id: uid,
       userId: uid,
-      balance: 0,
+      balance: CAPTAIN_STARTER_BALANCE,
+      starterBalanceApplied: true,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
+    return;
+  }
+
+  const data = walletSnap.data() || {};
+  const currentBalance = Number(data.balance || 0);
+  if (data.starterBalanceApplied !== true && currentBalance <= 0) {
+    await walletRef.set(
+      {
+        balance: CAPTAIN_STARTER_BALANCE,
+        starterBalanceApplied: true,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true },
+    );
   }
 }
 

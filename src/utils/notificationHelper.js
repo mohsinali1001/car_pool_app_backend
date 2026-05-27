@@ -4,9 +4,14 @@ const HIGH_PRIORITY_TYPES = new Set([
   'new_deal',
   'deal_confirmed',
   'deal_cancelled',
+  'deal_counter',
   'ride_started',
   'ride_completed',
   'deal_message',
+  'customer_request',
+  'customer_offer',
+  'customer_counter',
+  'customer_request_accepted',
 ]);
 
 async function saveInAppNotification(userId, { title, body, type, data }) {
@@ -66,6 +71,15 @@ async function pushToUser(userId, { title, body, type, data }) {
     await messaging.send(message);
   } catch (e) {
     console.error(`FCM push failed for user ${userId}:`, e.message);
+    const code = e.code || e.errorInfo?.code || '';
+    if (
+      code.includes('registration-token-not-registered') ||
+      e.message.includes('Requested entity was not found')
+    ) {
+      try {
+        await db.collection('users').doc(userId).set({ fcmToken: null }, { merge: true });
+      } catch (_) {}
+    }
   }
 }
 

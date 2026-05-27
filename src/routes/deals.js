@@ -4,6 +4,7 @@ const {
   createDeal,
   confirmDeal,
   cancelDeal,
+  counterDeal,
   startDeal,
   completeDeal,
   getDeal,
@@ -22,6 +23,7 @@ router.get('/ride/:rideId', verifyToken, getRideDeals);
 router.get('/:dealId', verifyToken, getDeal);
 router.patch('/:dealId/confirm', verifyToken, confirmDeal);
 router.patch('/:dealId/cancel', verifyToken, cancelDeal);
+router.patch('/:dealId/counter', verifyToken, counterDeal);
 router.patch('/:dealId/start', verifyToken, startDeal);
 router.patch('/:dealId/boarding', verifyToken, updateBoardingStatus);
 router.patch('/:dealId/complete', verifyToken, completeDeal);

@@ -1,6 +1,7 @@
 const { db } = require('../config/firebase');
 
 const MIN_CAPTAIN_BALANCE = 200;
+const CAPTAIN_STARTER_BALANCE = 5000;
 
 async function ensureWallet(uid) {
   const ref = db.collection('wallets').doc(uid);
@@ -9,13 +10,28 @@ async function ensureWallet(uid) {
     const wallet = {
       id: uid,
       userId: uid,
-      balance: 0,
+      balance: CAPTAIN_STARTER_BALANCE,
+      starterBalanceApplied: true,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
     await ref.set(wallet);
     return wallet;
   }
+
+  const data = doc.data() || {};
+  const currentBalance = Number(data.balance || 0);
+  if (data.starterBalanceApplied !== true && currentBalance <= 0) {
+    const updated = {
+      ...data,
+      balance: CAPTAIN_STARTER_BALANCE,
+      starterBalanceApplied: true,
+      updatedAt: new Date().toISOString(),
+    };
+    await ref.set(updated, { merge: true });
+    return { id: uid, ...updated };
+  }
+
   return { id: uid, ...doc.data() };
 }
 
@@ -86,6 +102,7 @@ async function deductBalance(uid, amount, meta = {}) {
 
 module.exports = {
   MIN_CAPTAIN_BALANCE,
+  CAPTAIN_STARTER_BALANCE,
   ensureWallet,
   getBalance,
   recordTransaction,

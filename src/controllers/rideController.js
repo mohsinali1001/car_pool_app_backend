@@ -55,6 +55,11 @@ const postRide = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing required fields', code: 'MISSING_FIELDS' });
     }
 
+    const parsedSeats = parseInt(totalSeats, 10);
+    if (!Number.isInteger(parsedSeats) || parsedSeats < 1) {
+      return res.status(400).json({ success: false, error: 'totalSeats must be at least 1', code: 'INVALID_TOTAL_SEATS' });
+    }
+
     const ride = {
       captainId: uid,
       captainName: userData.name || 'Anonymous',
@@ -68,8 +73,8 @@ const postRide = async (req, res) => {
       endLat: parseFloat(endLat) || 0.0,
       endLng: parseFloat(endLng) || 0.0,
       departureTime: new Date(departureTime).toISOString(),
-      totalSeats: normalizedRideMode === 'solo' ? 1 : parseInt(totalSeats),
-      availableSeats: normalizedRideMode === 'solo' ? 1 : parseInt(totalSeats),
+      totalSeats: parsedSeats,
+      availableSeats: parsedSeats,
       full: false,
       suggestedFare: parseFloat(suggestedFare),
       rideType: rideType || 'random',
@@ -153,6 +158,10 @@ const getActiveRides = async (req, res) => {
     let query = db.collection('rides').where('status', '==', 'active').where('departureTime', '>=', now);
     const snap = await query.orderBy('departureTime').get();
     let rides = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+    if (requesterGender !== 'female') {
+      rides = rides.filter(r => r.isLadiesRide !== true);
+    }
 
     if (rideType) {
       const rt = String(rideType).toLowerCase();

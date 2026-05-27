@@ -3,7 +3,7 @@ const { deductBalance, addBalance } = require('../utils/walletHelper');
 const { pushToUser } = require('../utils/notificationHelper');
 const { RIDE_STATUS, DEAL_STATUS, ACTIVE_DEAL_STATUSES } = require('../constants/statuses');
 
-const PLATFORM_FEE_PERCENT = 0.1;
+const PLATFORM_FEE_PERCENT = 0.05;
 
 function generalPickupArea(address) {
   if (!address || typeof address !== 'string') return 'Along route';
@@ -150,6 +150,7 @@ const createDeal = async (req, res) => {
     if (!userDoc.exists) {
       return res.status(404).json({ success: false, error: 'User not found', code: 'USER_NOT_FOUND' });
     }
+    const customerGender = (userDoc.data().gender || '').toString().trim().toLowerCase();
 
     const rideRef = db.collection('rides').doc(rideId);
     const dealRef = db.collection('deals').doc();
@@ -167,6 +168,9 @@ const createDeal = async (req, res) => {
       if (!ride.exists) throw new Error('Ride not found');
       const rideStatus = ride.data().status;
       const rideData = ride.data();
+      if (rideData.isLadiesRide === true && customerGender !== 'female') {
+        throw new Error('Ladies rides can only be booked by female passengers');
+      }
       if (rideStatus === RIDE_STATUS.FILLED || rideData.full === true) {
         throw new Error('Ride is full');
       }
@@ -242,7 +246,7 @@ const confirmDeal = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Deal already processed', code: 'INVALID_STATE' });
     }
 
-    const commission = parseFloat(deal.agreedFare || 0) * 0.1;
+    const commission = parseFloat(deal.agreedFare || 0) * PLATFORM_FEE_PERCENT;
     const walletRef = db.collection('wallets').doc(uid);
     const walletSnap = await walletRef.get();
     const currentBalance = walletSnap.exists ? Number(walletSnap.data().balance || 0) : 0;
@@ -275,7 +279,7 @@ const confirmDeal = async (req, res) => {
       type: 'commission',
       amount: -commission,
       reference: dealId,
-      description: `10% commission for deal ${dealId}`,
+      description: `5% commission for deal ${dealId}`,
       createdAt: now,
     });
 
@@ -363,6 +367,64 @@ const cancelDeal = async (req, res) => {
     return res.json({ success: true, message: 'Deal cancelled' });
   } catch (err) {
     return res.status(400).json({ success: false, error: err.message, code: 'CANCEL_DEAL_ERROR' });
+  }
+};
+
+const counterDeal = async (req, res) => {
+  const { dealId } = req.params;
+  const uid = req.user.uid;
+  const { counterFare, message } = req.body;
+  const parsedFare = parseFloat(counterFare);
+
+  if (!Number.isFinite(parsedFare) || parsedFare <= 0) {
+    return res.status(400).json({ success: false, error: 'counterFare must be a positive number', code: 'INVALID_COUNTER_FARE' });
+  }
+
+  try {
+    const dealRef = db.collection('deals').doc(dealId);
+    const dealSnap = await dealRef.get();
+    if (!dealSnap.exists) {
+      return res.status(404).json({ success: false, error: 'Deal not found', code: 'DEAL_NOT_FOUND' });
+    }
+
+    const deal = dealSnap.data();
+    if (deal.captainId !== uid && deal.customerId !== uid) {
+      return res.status(403).json({ success: false, error: 'Unauthorized', code: 'UNAUTHORIZED' });
+    }
+    if (deal.status !== DEAL_STATUS.PENDING) {
+      return res.status(400).json({ success: false, error: 'Only pending deals can be countered', code: 'INVALID_STATE' });
+    }
+
+    const isCaptain = deal.captainId === uid;
+    const now = new Date().toISOString();
+    const updateData = {
+      agreedFare: parsedFare,
+      lastCounterBy: isCaptain ? 'captain' : 'customer',
+      lastCounterAt: now,
+      updatedAt: now,
+    };
+    if (message != null && String(message).trim().isNotEmpty) {
+      updateData.customerMessage = String(message).trim();
+    }
+
+    await dealRef.update(updateData);
+
+    const recipientId = isCaptain ? deal.customerId : deal.captainId;
+    await pushToUser(recipientId, {
+      title: isCaptain ? 'Captain sent counter fare' : 'Passenger sent counter fare',
+      body: `${isCaptain ? 'Captain' : 'Passenger'} offered Rs. ${parsedFare.toFixed(0)}. Tap to respond.`,
+      type: 'deal_counter',
+      data: {
+        dealId,
+        rideId: deal.rideId || '',
+        screen: isCaptain ? 'my-bookings' : 'my-rides',
+      },
+    });
+
+    const updated = await dealRef.get();
+    return res.json({ success: true, message: 'Counter fare sent', deal: { id: dealId, ...updated.data() } });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message, code: 'COUNTER_DEAL_ERROR' });
   }
 };
 
@@ -797,6 +859,7 @@ module.exports = {
   createDeal,
   confirmDeal,
   cancelDeal,
+  counterDeal,
   startDeal,
   completeDeal,
   getDeal,
