@@ -30,27 +30,48 @@ const postRide = async (req, res) => {
       cargoType, weightCapacity, truckSize,
     } = req.body;
 
+    // Validate rideMode
     const rideMode = req.body.rideMode || 'share';
     const normalizedRideMode = String(rideMode).toLowerCase();
     if (!['share', 'solo'].includes(normalizedRideMode)) {
       return res.status(400).json({ success: false, error: 'rideMode must be share or solo', code: 'INVALID_RIDE_MODE' });
     }
 
+    // Validate rideType and vehicleType
+    const normalizedRideType = String(rideType || 'random').toLowerCase();
+    const isTourRide = normalizedRideType === 'tour';
+    const captainVehicleType = String(userData.captainVehicleType || '').toLowerCase();
     const normalizedVehicleType = String(vehicleType || '').toLowerCase();
-    const allowedVehicleTypes = ['car', 'bike', 'bus', 'truck', 'shazore', 'tour'];
-    const inferredVehicleType = normalizedVehicleType || (rideType === 'tour' ? 'tour' : 'car');
-    if (!allowedVehicleTypes.includes(inferredVehicleType)) {
-      return res.status(400).json({ success: false, error: 'vehicleType must be one of car, bike, bus, truck, shazore, tour', code: 'INVALID_VEHICLE_TYPE' });
+    
+    // Allowed vehicle types
+    const allowedVehicleTypes = ['car', 'bike', 'bus', 'truck', 'shazore'];
+    
+    // Infer vehicle type - FIXED
+    let inferredVehicleType;
+    if (isTourRide) {
+      inferredVehicleType = 'tour';
+    } else if (normalizedVehicleType && allowedVehicleTypes.includes(normalizedVehicleType)) {
+      inferredVehicleType = normalizedVehicleType;
+    } else if (captainVehicleType && allowedVehicleTypes.includes(captainVehicleType)) {
+      inferredVehicleType = captainVehicleType;
+    } else {
+      inferredVehicleType = 'car';
+    }
+    
+    // Validate vehicle type
+    if (!allowedVehicleTypes.includes(inferredVehicleType) && inferredVehicleType !== 'tour') {
+      return res.status(400).json({ success: false, error: 'vehicleType must be one of car, bike, bus, truck, shazore', code: 'INVALID_VEHICLE_TYPE' });
     }
 
-    const captainVehicleType = String(userData.captainVehicleType || '').toLowerCase();
-    if (captainVehicleType) {
+    // Check captain vehicle type mismatch (only for non-tour rides)
+    if (captainVehicleType && !isTourRide) {
       const postingType = inferredVehicleType === 'shazore' ? 'shazore' : inferredVehicleType;
       if (postingType !== captainVehicleType) {
         return res.status(403).json({ success: false, error: `You can only post ${captainVehicleType} rides`, code: 'VEHICLE_TYPE_MISMATCH' });
       }
     }
 
+    // Required fields check
     if (!startLocation || !endLocation || !departureTime || !totalSeats || !suggestedFare) {
       return res.status(400).json({ success: false, error: 'Missing required fields', code: 'MISSING_FIELDS' });
     }
@@ -60,6 +81,7 @@ const postRide = async (req, res) => {
       return res.status(400).json({ success: false, error: 'totalSeats must be at least 1', code: 'INVALID_TOTAL_SEATS' });
     }
 
+    // Build ride object
     const ride = {
       captainId: uid,
       captainName: userData.name || 'Anonymous',
@@ -77,7 +99,7 @@ const postRide = async (req, res) => {
       availableSeats: parsedSeats,
       full: false,
       suggestedFare: parseFloat(suggestedFare),
-      rideType: rideType || 'random',
+      rideType: normalizedRideType,
       rideMode: normalizedRideMode,
       vehicleType: inferredVehicleType === 'shazore' ? 'truck' : inferredVehicleType,
       isShazoreRide: inferredVehicleType === 'shazore',
@@ -89,7 +111,8 @@ const postRide = async (req, res) => {
       updatedAt: new Date().toISOString(),
     };
 
-    if (inferredVehicleType === 'tour') {
+    // Handle tour ride specific fields
+    if (isTourRide) {
       const normalizedTourType = String(tourType || 'share').toLowerCase();
       if (!['share', 'solo'].includes(normalizedTourType)) {
         return res.status(400).json({ success: false, error: "tourType must be share or solo", code: 'INVALID_TOUR_TYPE' });
@@ -106,6 +129,7 @@ const postRide = async (req, res) => {
       }
     }
 
+    // Handle truck / shazore specific fields
     if (inferredVehicleType === 'truck' || inferredVehicleType === 'shazore') {
       const normalizedTruckSize = String(truckSize || '').toLowerCase();
       if (normalizedTruckSize && !['mini', 'half', 'full'].includes(normalizedTruckSize)) {
@@ -114,11 +138,12 @@ const postRide = async (req, res) => {
       ride.cargoType = (cargoType || '').toString().trim() || null;
       ride.weightCapacity = weightCapacity != null ? Number(weightCapacity) : null;
       ride.truckSize = normalizedTruckSize || (inferredVehicleType === 'shazore' ? 'full' : null);
-      if (inferredVehicleType === 'shazore') ride.isShazoreRide = true;
     }
 
+    // Save to Firebase
     const ref = await db.collection('rides').add(ride);
 
+    // Send notifications
     try {
       const usersSnap = await db.collection('users').where('role', 'in', ['customer', 'passenger']).get();
       const captainCity = (userData.city || '').toString().trim().toLowerCase();
@@ -159,16 +184,20 @@ const getActiveRides = async (req, res) => {
     const snap = await query.orderBy('departureTime').get();
     let rides = snap.docs.map(d => ({ id: d.id, ...d.data() }));
 
+    // Filter ladies rides
     if (requesterGender !== 'female') {
       rides = rides.filter(r => r.isLadiesRide !== true);
     }
 
+    // Filter by rideType / vehicleType
     if (rideType) {
       const rt = String(rideType).toLowerCase();
-      if (['car', 'bike', 'bus', 'truck', 'tour'].includes(rt)) {
+      if (['car', 'bike', 'bus', 'truck'].includes(rt)) {
         rides = rides.filter(r => (r.vehicleType || '').toString().toLowerCase() === rt);
       } else if (rt === 'shazore') {
         rides = rides.filter(r => r.isShazoreRide === true);
+      } else if (rt === 'tour') {
+        rides = rides.filter(r => (r.rideType || '').toString().toLowerCase() === 'tour');
       } else if (rt === 'ladies') {
         if (requesterGender !== 'female') rides = [];
         else rides = rides.filter(r => r.isLadiesRide === true);
@@ -177,6 +206,7 @@ const getActiveRides = async (req, res) => {
       }
     }
 
+    // Filter by rideMode
     if (rideMode) {
       const rm = String(rideMode).toLowerCase();
       if (['solo', 'share'].includes(rm)) {
@@ -184,6 +214,7 @@ const getActiveRides = async (req, res) => {
       }
     }
 
+    // Filter by location
     if (startLocation) {
       const q = startLocation.toLowerCase();
       rides = rides.filter(r => r.startLocation.toLowerCase().includes(q) || r.endLocation.toLowerCase().includes(q));
@@ -202,6 +233,7 @@ const updateRideStatus = async (req, res) => {
   const uid = req.user ? req.user.uid : req.body.captainId;
   const validStatuses = ['active', 'filled', 'completed', 'cancelled'];
   if (!validStatuses.includes(status)) return res.status(400).json({ success: false, error: 'Invalid status type', code: 'INVALID_STATUS' });
+  
   try {
     const rideRef = db.collection('rides').doc(rideId);
     const rideDoc = await rideRef.get();
@@ -217,6 +249,7 @@ const updateRideStatus = async (req, res) => {
 const getMyRides = async (req, res) => {
   const uid = req.user ? req.user.uid : req.query.captainId;
   if (!uid) return res.status(400).json({ success: false, error: 'Captain ID is required', code: 'MISSING_CAPTAIN_ID' });
+  
   try {
     const snap = await db.collection('rides').where('captainId', '==', uid).orderBy('createdAt', 'desc').get();
     const rides = snap.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -242,6 +275,7 @@ const updateRideLocation = async (req, res) => {
   const { lat, lng } = req.body;
   const uid = req.user ? req.user.uid : req.body.captainId;
   if (lat === undefined || lng === undefined) return res.status(400).json({ success: false, error: 'Latitude and Longitude are required', code: 'MISSING_COORDINATES' });
+  
   try {
     const rideRef = db.collection('rides').doc(rideId);
     const rideDoc = await rideRef.get();
