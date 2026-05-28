@@ -2,6 +2,28 @@ const { db } = require('../config/firebase');
 const { getBalance } = require('../utils/walletHelper');
 const { pushToUser } = require('../utils/notificationHelper');
 
+// Helper function to parse numbers
+function parseNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Helper function to calculate distance in km using Haversine formula
+function distanceKm(aLat, aLng, bLat, bLng) {
+  if ([aLat, aLng, bLat, bLng].some((v) => v == null)) return null;
+  const toRad = (value) => (value * Math.PI) / 180;
+  const earthKm = 6371;
+  const dLat = toRad(bLat - aLat);
+  const dLng = toRad(bLng - aLng);
+  const lat1 = toRad(aLat);
+  const lat2 = toRad(bLat);
+  const h =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1) * Math.cos(lat2) *
+      Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return earthKm * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
 const postRide = async (req, res) => {
   const uid = req.user ? req.user.uid : req.body.captainId;
   if (!uid) return res.status(400).json({ success: false, error: 'Captain ID is required', code: 'MISSING_CAPTAIN_ID' });
@@ -171,7 +193,8 @@ const postRide = async (req, res) => {
 };
 
 const getActiveRides = async (req, res) => {
-  const { rideType, startLocation, rideMode } = req.query;
+  const { rideType, startLocation, rideMode, lat, lng, radiusKm } = req.query;
+  
   try {
     let requesterGender = '';
     if (req.user?.uid) {
@@ -214,10 +237,38 @@ const getActiveRides = async (req, res) => {
       }
     }
 
-    // Filter by location
+    // Filter by location (text-based)
     if (startLocation) {
       const q = startLocation.toLowerCase();
       rides = rides.filter(r => r.startLocation.toLowerCase().includes(q) || r.endLocation.toLowerCase().includes(q));
+    }
+
+    // **NEW: Location-based distance filtering using coordinates**
+    const userLat = parseNumber(lat);
+    const userLng = parseNumber(lng);
+    const radiusKmNum = parseNumber(radiusKm) || 15;
+
+    if (userLat != null && userLng != null) {
+      // Calculate distance for each ride and filter within radius
+      rides = rides
+        .map((r) => ({
+          ...r,
+          distanceKm: distanceKm(userLat, userLng, parseNumber(r.startLat), parseNumber(r.startLng)),
+        }))
+        .filter((r) => r.distanceKm == null || r.distanceKm <= radiusKmNum)
+        .sort((a, b) => {
+          const ad = a.distanceKm == null ? Number.MAX_SAFE_INTEGER : a.distanceKm;
+          const bd = b.distanceKm == null ? Number.MAX_SAFE_INTEGER : b.distanceKm;
+          if (ad !== bd) return ad - bd;
+          return String(b.createdAt || '').localeCompare(String(a.createdAt || ''));
+        })
+        .map((r) => ({
+          ...r,
+          distanceKm: r.distanceKm == null ? null : Number(r.distanceKm.toFixed(2)),
+        }));
+    } else {
+      // Sort by creation date if no coordinates provided
+      rides.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
     }
 
     return res.json({ success: true, count: rides.length, rides });
