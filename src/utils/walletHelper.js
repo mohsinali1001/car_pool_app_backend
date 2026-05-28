@@ -40,7 +40,7 @@ async function getBalance(uid) {
   return wallet.balance || 0;
 }
 
-async function recordTransaction({ walletId, type, amount, description, dealId, reference }) {
+async function recordTransaction({ walletId, type, amount, description, dealId, reference, balanceAfter }) {
   await db.collection('transactions').add({
     walletId,
     type,
@@ -48,6 +48,7 @@ async function recordTransaction({ walletId, type, amount, description, dealId, 
     description: description || type,
     dealId: dealId || null,
     reference: reference || null,
+    balanceAfter: balanceAfter ?? null,
     createdAt: new Date().toISOString(),
   });
 }
@@ -70,6 +71,7 @@ async function addBalance(uid, amount, meta = {}) {
     amount,
     description: meta.description || 'Wallet top-up',
     reference: meta.reference,
+    balanceAfter: newBalance,
   });
   return newBalance;
 }
@@ -96,6 +98,7 @@ async function deductBalance(uid, amount, meta = {}) {
     amount,
     description: meta.description || 'Wallet deduction',
     dealId: meta.dealId,
+    balanceAfter: newBalance,
   });
   return newBalance;
 }

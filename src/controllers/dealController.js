@@ -93,6 +93,12 @@ async function populateRide(deal) {
     id: deal.rideId,
     startLocation: ride.startLocation,
     endLocation: ride.endLocation,
+    exactLocation: ride.exactLocation,
+    exactDropLocation: ride.exactDropLocation,
+    startLat: ride.startLat,
+    startLng: ride.startLng,
+    endLat: ride.endLat,
+    endLng: ride.endLng,
     departureTime: ride.departureTime,
     captainName: ride.captainName,
     captainId: ride.captainId,
@@ -277,9 +283,10 @@ const confirmDeal = async (req, res) => {
     await db.collection('transactions').add({
       walletId: uid,
       type: 'commission',
-      amount: -commission,
+      amount: commission,
       reference: dealId,
       description: `5% commission for deal ${dealId}`,
+      balanceAfter: newBalance,
       createdAt: now,
     });
 

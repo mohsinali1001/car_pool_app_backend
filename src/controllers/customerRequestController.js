@@ -44,6 +44,7 @@ const createCustomerRequest = async (req, res) => {
     startLocation,
     endLocation,
     pickupLocation,
+    dropLocation,
     vehicleType,
     rideMode,
     desiredFare,
@@ -90,6 +91,7 @@ const createCustomerRequest = async (req, res) => {
       startLocation: String(startLocation).trim(),
       endLocation: String(endLocation).trim(),
       pickupLocation: String(pickupLocation || startLocation).trim(),
+      dropLocation: String(dropLocation || endLocation).trim(),
       requestedAt: new Date(requestedAt).toISOString(),
       vehicleType: normalizedVehicleType,
       rideMode: normalizedRideMode,
@@ -123,7 +125,7 @@ const createCustomerRequest = async (req, res) => {
       await Promise.all(targets.map((doc) =>
         pushToUser(doc.id, {
           title: 'New Customer Request',
-          body: `${request.customerName} needs a ride from ${request.startLocation} to ${request.endLocation}.`,
+          body: `${request.customerName} needs a ride from ${request.startLocation} to ${request.endLocation}. ${request.pickupLocation ? `Pickup: ${request.pickupLocation}.` : ''}${request.dropLocation ? ` Drop: ${request.dropLocation}.` : ''}`,
           type: 'customer_request',
           data: { requestId: ref.id, screen: 'customer-requests' },
         }),
@@ -148,21 +150,30 @@ const getOpenCustomerRequests = async (req, res) => {
     const captain = captainDoc.data();
     const captainLat = parseNumber(req.query.lat);
     const captainLng = parseNumber(req.query.lng);
+    const radiusKm = parseNumber(req.query.radiusKm) || 15;
 
     const snap = await db
       .collection('customerRideRequests')
       .where('status', 'in', ['open', 'countered', 'accepted'])
       .orderBy('createdAt', 'desc')
-      .limit(50)
+      .limit(100)
       .get();
 
     let requests = snap.docs.map((d) => {
       const request = { id: d.id, ...d.data() };
       const km = distanceKm(captainLat, captainLng, request.startLat, request.startLng);
       request.distanceKm = km == null ? null : Number(km.toFixed(2));
-      request.isNearby = km != null && km <= 10;
+      request.isNearby = km != null && km <= radiusKm;
       return request;
     });
+    const now = new Date();
+    requests = requests.filter((r) => {
+      const requested = r.requestedAt ? new Date(r.requestedAt) : null;
+      return !requested || Number.isNaN(requested.getTime()) || requested >= now;
+    });
+    if (captainLat != null && captainLng != null) {
+      requests = requests.filter((r) => r.distanceKm == null || r.distanceKm <= radiusKm);
+    }
     requests = requests.filter((r) => r.status !== 'accepted' || r.acceptedCaptainId === uid);
     requests.sort((a, b) => {
       if (a.isNearby !== b.isNearby) return a.isNearby ? -1 : 1;
@@ -184,11 +195,16 @@ const getMyCustomerRequests = async (req, res) => {
       .collection('customerRideRequests')
       .where('customerId', '==', req.user.uid)
       .orderBy('createdAt', 'desc')
-      .limit(25)
+      .limit(100)
       .get();
-    const requests = await Promise.all(
+    let requests = await Promise.all(
       snap.docs.map((doc) => attachOffers({ id: doc.id, ...doc.data() })),
     );
+    const now = new Date();
+    requests = requests.filter((r) => {
+      const requested = r.requestedAt ? new Date(r.requestedAt) : null;
+      return !requested || Number.isNaN(requested.getTime()) || requested >= now;
+    });
     return res.json({ success: true, requests });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message, code: 'GET_MY_CUSTOMER_REQUESTS_ERROR' });

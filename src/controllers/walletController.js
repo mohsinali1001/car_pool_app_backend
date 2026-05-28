@@ -63,8 +63,10 @@ const getEarningsSummary = async (req, res) => {
     const now = new Date();
 
     for (const tx of transactions) {
-      const amt = tx.amount || 0;
+      const amt = Math.abs(Number(tx.amount || 0));
       if (tx.type === 'commission_deduction') {
+        totalDebit += amt;
+      } else if (tx.type === 'commission') {
         totalDebit += amt;
       } else {
         totalCredit += amt;
@@ -73,7 +75,8 @@ const getEarningsSummary = async (req, res) => {
       const diffDays = Math.floor((now - created) / (1000 * 60 * 60 * 24));
       if (diffDays >= 0 && diffDays < 7) {
         const idx = 6 - diffDays;
-        weekBuckets[idx] += tx.type === 'commission_deduction' ? -amt : amt;
+        const isDebit = tx.type === 'commission_deduction' || tx.type === 'commission';
+        weekBuckets[idx] += isDebit ? -amt : amt;
       }
     }
 

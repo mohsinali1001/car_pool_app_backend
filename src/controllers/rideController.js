@@ -49,7 +49,7 @@ const postRide = async (req, res) => {
       departureTime, totalSeats, suggestedFare,
       rideType, vehicleType, acceptsDelivery, vehicleInfo,
       tourType, maxPassengers,
-      cargoType, weightCapacity, truckSize,
+      cargoType, weightCapacity, truckSize, exactLocation, exactDropLocation,
     } = req.body;
 
     // Validate rideMode
@@ -112,6 +112,8 @@ const postRide = async (req, res) => {
       captainGender: (userData.gender || '').toString().toLowerCase() || null,
       startLocation: startLocation.trim(),
       endLocation: endLocation.trim(),
+      exactLocation: (exactLocation || '').toString().trim() || null,
+      exactDropLocation: (exactDropLocation || '').toString().trim() || null,
       startLat: parseFloat(startLat) || 0.0,
       startLng: parseFloat(startLng) || 0.0,
       endLat: parseFloat(endLat) || 0.0,
@@ -177,7 +179,7 @@ const postRide = async (req, res) => {
       });
       await Promise.all(targets.map(doc => pushToUser(doc.id, {
         title: 'New Ride Available',
-        body: `New ride from ${ride.startLocation} to ${ride.endLocation} near you!`,
+        body: `New ride from ${ride.startLocation} to ${ride.endLocation} near you!${ride.exactLocation ? ` Exact pickup: ${ride.exactLocation}.` : ''}${ride.exactDropLocation ? ` Exact drop: ${ride.exactDropLocation}.` : ''}`,
         type: 'new_ride',
         data: { rideId: ref.id, screen: 'find-ride' },
       })));
@@ -193,9 +195,11 @@ const postRide = async (req, res) => {
 };
 
 const getActiveRides = async (req, res) => {
-  const { rideType, startLocation, rideMode, lat, lng, radiusKm } = req.query;
-  
+  const { rideType, startLocation, endLocation, rideMode } = req.query;
   try {
+    const userLat = parseNumber(req.query.lat);
+    const userLng = parseNumber(req.query.lng);
+    const radiusKm = parseNumber(req.query.radiusKm) || 15;
     let requesterGender = '';
     if (req.user?.uid) {
       const requesterDoc = await db.collection('users').doc(req.user.uid).get();
@@ -240,22 +244,21 @@ const getActiveRides = async (req, res) => {
     // Filter by location (text-based)
     if (startLocation) {
       const q = startLocation.toLowerCase();
-      rides = rides.filter(r => r.startLocation.toLowerCase().includes(q) || r.endLocation.toLowerCase().includes(q));
+      rides = rides.filter(r => r.startLocation.toLowerCase().includes(q));
     }
 
-    // **NEW: Location-based distance filtering using coordinates**
-    const userLat = parseNumber(lat);
-    const userLng = parseNumber(lng);
-    const radiusKmNum = parseNumber(radiusKm) || 15;
+    if (endLocation) {
+      const q = endLocation.toLowerCase();
+      rides = rides.filter(r => r.endLocation.toLowerCase().includes(q));
+    }
 
     if (userLat != null && userLng != null) {
-      // Calculate distance for each ride and filter within radius
       rides = rides
         .map((r) => ({
           ...r,
           distanceKm: distanceKm(userLat, userLng, parseNumber(r.startLat), parseNumber(r.startLng)),
         }))
-        .filter((r) => r.distanceKm == null || r.distanceKm <= radiusKmNum)
+        .filter((r) => r.distanceKm == null || r.distanceKm <= radiusKm)
         .sort((a, b) => {
           const ad = a.distanceKm == null ? Number.MAX_SAFE_INTEGER : a.distanceKm;
           const bd = b.distanceKm == null ? Number.MAX_SAFE_INTEGER : b.distanceKm;
@@ -267,7 +270,6 @@ const getActiveRides = async (req, res) => {
           distanceKm: r.distanceKm == null ? null : Number(r.distanceKm.toFixed(2)),
         }));
     } else {
-      // Sort by creation date if no coordinates provided
       rides.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
     }
 
@@ -302,8 +304,17 @@ const getMyRides = async (req, res) => {
   if (!uid) return res.status(400).json({ success: false, error: 'Captain ID is required', code: 'MISSING_CAPTAIN_ID' });
   
   try {
+    const now = new Date();
     const snap = await db.collection('rides').where('captainId', '==', uid).orderBy('createdAt', 'desc').get();
-    const rides = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const rides = snap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .filter((ride) => {
+        const status = (ride.status || '').toString().toLowerCase();
+        if (['completed', 'cancelled'].includes(status)) return false;
+        const departure = ride.departureTime ? new Date(ride.departureTime) : null;
+        if (!departure || Number.isNaN(departure.getTime())) return true;
+        return departure >= now;
+      });
     return res.json({ success: true, rides });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message, code: 'GET_MY_RIDES_ERROR' });
