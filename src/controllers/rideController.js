@@ -266,7 +266,6 @@ const getActiveRides = async (req, res) => {
   try {
     const userLat = parseNumber(req.query.lat);
     const userLng = parseNumber(req.query.lng);
-    const radiusKm = parseNumber(req.query.radiusKm) || 20;
     let requesterGender = '';
     if (req.user?.uid) {
       const requesterDoc = await db.collection('users').doc(req.user.uid).get();
@@ -325,7 +324,6 @@ const getActiveRides = async (req, res) => {
           ...r,
           distanceKm: distanceKm(userLat, userLng, parseNumber(r.startLat), parseNumber(r.startLng)),
         }))
-        .filter((r) => r.distanceKm != null && r.distanceKm <= radiusKm)
         .sort((a, b) => {
           const ad = a.distanceKm == null ? Number.MAX_SAFE_INTEGER : a.distanceKm;
           const bd = b.distanceKm == null ? Number.MAX_SAFE_INTEGER : b.distanceKm;
