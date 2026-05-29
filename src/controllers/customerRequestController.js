@@ -265,11 +265,6 @@ const getMyCustomerRequests = async (req, res) => {
     let requests = await Promise.all(
       snap.docs.map((doc) => attachOffers({ id: doc.id, ...doc.data() })),
     );
-    const now = new Date();
-    requests = requests.filter((r) => {
-      const requested = r.requestedAt ? new Date(r.requestedAt) : null;
-      return !requested || Number.isNaN(requested.getTime()) || requested >= now;
-    });
     return res.json({ success: true, requests });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message, code: 'GET_MY_CUSTOMER_REQUESTS_ERROR' });
