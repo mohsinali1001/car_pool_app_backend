@@ -111,25 +111,4 @@ router.patch('/profile/captain', verifyToken, async (req, res) => {
   }
 });
 
-// General profile update
-router.patch('/profile', verifyToken, async (req, res) => {
-  const { db } = require('../config/firebase');
-  try {
-    const userRef = db.collection('users').doc(req.user.uid);
-    const snap = await userRef.get();
-    if (!snap.exists) {
-      return res.status(404).json({
-        success: false,
-        error: 'User not found',
-        code: 'USER_NOT_FOUND',
-      });
-    }
-    await userRef.set({ ...req.body, updatedAt: new Date().toISOString() }, { merge: true });
-    const updated = await userRef.get();
-    return res.json({ success: true, user: updated.data() });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-
 module.exports = router;

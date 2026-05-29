@@ -199,7 +199,7 @@ const getActiveRides = async (req, res) => {
   try {
     const userLat = parseNumber(req.query.lat);
     const userLng = parseNumber(req.query.lng);
-    const radiusKm = parseNumber(req.query.radiusKm) || 15;
+    const radiusKm = parseNumber(req.query.radiusKm) || 20;
     let requesterGender = '';
     if (req.user?.uid) {
       const requesterDoc = await db.collection('users').doc(req.user.uid).get();
@@ -304,17 +304,8 @@ const getMyRides = async (req, res) => {
   if (!uid) return res.status(400).json({ success: false, error: 'Captain ID is required', code: 'MISSING_CAPTAIN_ID' });
   
   try {
-    const now = new Date();
     const snap = await db.collection('rides').where('captainId', '==', uid).orderBy('createdAt', 'desc').get();
-    const rides = snap.docs
-      .map(d => ({ id: d.id, ...d.data() }))
-      .filter((ride) => {
-        const status = (ride.status || '').toString().toLowerCase();
-        if (['completed', 'cancelled'].includes(status)) return false;
-        const departure = ride.departureTime ? new Date(ride.departureTime) : null;
-        if (!departure || Number.isNaN(departure.getTime())) return true;
-        return departure >= now;
-      });
+    const rides = snap.docs.map(d => ({ id: d.id, ...d.data() }));
     return res.json({ success: true, rides });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message, code: 'GET_MY_RIDES_ERROR' });

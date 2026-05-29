@@ -43,6 +43,15 @@ app.use('/api/notifications', notificationRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
+// Backward-compatible root routes for older mobile builds.
+app.use('/auth', authLimiter, authRoutes);
+app.use('/rides', rideLimiter, rideRoutes);
+app.use('/deals', dealLimiter, dealRoutes);
+app.use('/customer-requests', dealLimiter, customerRequestRoutes);
+app.use('/wallet', walletLimiter, walletRoutes);
+app.use('/notifications', notificationRoutes);
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
 // 404 Handler
 app.use((req, res) => res.status(404).json({ success: false, error: 'Route not found', code: 'ROUTE_NOT_FOUND' }));
 

@@ -58,11 +58,24 @@ const createCustomerRequest = async (req, res) => {
     city,
   } = req.body;
 
+  const parsedStartLat = parseNumber(startLat);
+  const parsedStartLng = parseNumber(startLng);
+  const parsedEndLat = parseNumber(endLat);
+  const parsedEndLng = parseNumber(endLng);
+
   if (!startLocation || !endLocation || !requestedAt) {
     return res.status(400).json({
       success: false,
       error: 'startLocation, endLocation and requestedAt are required',
       code: 'MISSING_FIELDS',
+    });
+  }
+
+  if ([parsedStartLat, parsedStartLng, parsedEndLat, parsedEndLng].some((v) => v == null)) {
+    return res.status(400).json({
+      success: false,
+      error: 'Map pickup and drop coordinates are required',
+      code: 'MAP_COORDINATES_REQUIRED',
     });
   }
 
@@ -102,10 +115,10 @@ const createCustomerRequest = async (req, res) => {
       acceptedCaptainPhone: null,
       captainPhoneRevealed: false,
       customerPhoneRevealed: false,
-      startLat: parseNumber(startLat),
-      startLng: parseNumber(startLng),
-      endLat: parseNumber(endLat),
-      endLng: parseNumber(endLng),
+      startLat: parsedStartLat,
+      startLng: parsedStartLng,
+      endLat: parsedEndLat,
+      endLng: parsedEndLng,
       customerLat: parseNumber(customerLat),
       customerLng: parseNumber(customerLng),
       city: (city || user.city || '').toString().trim(),
@@ -150,7 +163,7 @@ const getOpenCustomerRequests = async (req, res) => {
     const captain = captainDoc.data();
     const captainLat = parseNumber(req.query.lat);
     const captainLng = parseNumber(req.query.lng);
-    const radiusKm = parseNumber(req.query.radiusKm) || 15;
+    const radiusKm = parseNumber(req.query.radiusKm) || 20;
 
     const snap = await db
       .collection('customerRideRequests')
