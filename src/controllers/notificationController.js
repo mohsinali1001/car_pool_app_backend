@@ -29,6 +29,34 @@ const getMyNotifications = async (req, res) => {
   }
 };
 
+const getNotificationSummary = async (req, res) => {
+  try {
+    const snap = await db
+      .collection('notifications')
+      .where('userId', '==', req.user.uid)
+      .where('read', '==', false)
+      .limit(100)
+      .get();
+    const byType = {};
+    const byScreen = {};
+    snap.docs.forEach((doc) => {
+      const n = doc.data() || {};
+      const type = (n.type || 'general').toString();
+      const screen = (n.data?.screen || '').toString();
+      byType[type] = (byType[type] || 0) + 1;
+      if (screen) byScreen[screen] = (byScreen[screen] || 0) + 1;
+    });
+    return res.json({
+      success: true,
+      unreadCount: snap.size,
+      byType,
+      byScreen,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message, code: 'NOTIFICATION_SUMMARY_ERROR' });
+  }
+};
+
 const markNotificationsRead = async (req, res) => {
   try {
     const snap = await db
@@ -45,4 +73,4 @@ const markNotificationsRead = async (req, res) => {
   }
 };
 
-module.exports = { sendNotification, getMyNotifications, markNotificationsRead };
+module.exports = { sendNotification, getMyNotifications, getNotificationSummary, markNotificationsRead };

@@ -8,6 +8,8 @@ const HIGH_PRIORITY_TYPES = new Set([
   'ride_started',
   'ride_completed',
   'deal_message',
+  'new_ride',
+  'passenger_boarded',
   'customer_request',
   'customer_offer',
   'customer_counter',
