@@ -46,14 +46,16 @@ function pickUpdates(body) {
 async function ensureCaptainWallet(uid) {
   const walletRef = db.collection('wallets').doc(uid);
   const walletSnap = await walletRef.get();
+  const now = new Date().toISOString();
   if (!walletSnap.exists) {
     await walletRef.set({
       id: uid,
       userId: uid,
       balance: CAPTAIN_STARTER_BALANCE,
       starterBalanceApplied: true,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      starterBalanceAmount: CAPTAIN_STARTER_BALANCE,
+      createdAt: now,
+      updatedAt: now,
     });
     return;
   }
@@ -65,7 +67,8 @@ async function ensureCaptainWallet(uid) {
       {
         balance: CAPTAIN_STARTER_BALANCE,
         starterBalanceApplied: true,
-        updatedAt: new Date().toISOString(),
+        starterBalanceAmount: CAPTAIN_STARTER_BALANCE,
+        updatedAt: now,
       },
       { merge: true },
     );

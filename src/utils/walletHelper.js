@@ -6,14 +6,16 @@ const CAPTAIN_STARTER_BALANCE = 5000;
 async function ensureWallet(uid) {
   const ref = db.collection('wallets').doc(uid);
   const doc = await ref.get();
+  const now = new Date().toISOString();
   if (!doc.exists) {
     const wallet = {
       id: uid,
       userId: uid,
       balance: CAPTAIN_STARTER_BALANCE,
       starterBalanceApplied: true,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      starterBalanceAmount: CAPTAIN_STARTER_BALANCE,
+      createdAt: now,
+      updatedAt: now,
     };
     await ref.set(wallet);
     return wallet;
@@ -21,12 +23,22 @@ async function ensureWallet(uid) {
 
   const data = doc.data() || {};
   const currentBalance = Number(data.balance || 0);
-  if (data.starterBalanceApplied !== true && currentBalance <= 0) {
+  const starterMissing = data.starterBalanceApplied !== true;
+  const legacyZeroWallet =
+    currentBalance <= 0 && data.starterBalanceAmount !== CAPTAIN_STARTER_BALANCE;
+  if (starterMissing || legacyZeroWallet) {
+    const txSnap = await db
+      .collection('transactions')
+      .where('walletId', '==', uid)
+      .limit(1)
+      .get();
+    if (!txSnap.empty && !starterMissing) return { id: uid, ...data };
     const updated = {
       ...data,
       balance: CAPTAIN_STARTER_BALANCE,
       starterBalanceApplied: true,
-      updatedAt: new Date().toISOString(),
+      starterBalanceAmount: CAPTAIN_STARTER_BALANCE,
+      updatedAt: now,
     };
     await ref.set(updated, { merge: true });
     return { id: uid, ...updated };
