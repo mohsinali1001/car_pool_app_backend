@@ -147,6 +147,14 @@ const postRide = async (req, res) => {
     if (!Number.isInteger(parsedSeats) || parsedSeats < 1) {
       return res.status(400).json({ success: false, error: 'totalSeats must be at least 1', code: 'INVALID_TOTAL_SEATS' });
     }
+    const captainVehicleSeats = parseInt(userData.vehicleSeats || userData.totalSeats || 0, 10);
+    if (isTourRide && Number.isInteger(captainVehicleSeats) && captainVehicleSeats > 0 && parsedSeats > captainVehicleSeats) {
+      return res.status(400).json({
+        success: false,
+        error: `Tour seats cannot exceed your registered vehicle seats (${captainVehicleSeats})`,
+        code: 'TOUR_SEATS_EXCEED_VEHICLE',
+      });
+    }
 
     const parsedFare = parseNumber(suggestedFare);
     if (!parsedFare || parsedFare <= 0) {
@@ -201,11 +209,12 @@ const postRide = async (req, res) => {
       }
       ride.tourType = normalizedTourType;
       if (normalizedTourType === 'share') {
-        const parsedMax = parseInt(maxPassengers, 10);
+        const parsedMax = parseInt(maxPassengers ?? parsedSeats, 10);
         if (!Number.isInteger(parsedMax) || parsedMax < 1) {
-          return res.status(400).json({ success: false, error: 'maxPassengers is required for share tour', code: 'INVALID_MAX_PASSENGERS' });
+          ride.maxPassengers = parsedSeats;
+        } else {
+          ride.maxPassengers = Math.min(parsedMax, parsedSeats);
         }
-        ride.maxPassengers = parsedMax;
       } else {
         ride.maxPassengers = 1;
       }
