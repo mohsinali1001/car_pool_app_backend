@@ -9,7 +9,7 @@ const skipLocalhost = (req) => {
 // Global: relaxed in dev
 exports.globalLimiter = rateLimit({
   windowMs: isDev ? 60 * 1000 : 15 * 60 * 1000,
-  max: isDev ? 500 : 100,
+  max: isDev ? 500 : 3000,
   skip: skipLocalhost,
   message: { error: 'Too many requests, try again later' },
 });
@@ -17,7 +17,7 @@ exports.globalLimiter = rateLimit({
 // Deals: higher limit for reads/writes in dev
 exports.dealLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: isDev ? 60 : 20,
+  max: isDev ? 120 : 120,
   skip: skipLocalhost,
   message: { error: 'Too many booking attempts' },
 });
@@ -25,7 +25,7 @@ exports.dealLimiter = rateLimit({
 // Rides
 exports.rideLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: isDev ? 60 : 30,
+  max: isDev ? 120 : 120,
   skip: skipLocalhost,
   message: { error: 'Too many ride requests' },
 });
@@ -38,9 +38,10 @@ exports.authLimiter = rateLimit({
   message: { error: 'Too many auth requests' },
 });
 
-// Wallet: 10 req/hour
+// Wallet is polled by the app so balance updates appear immediately.
 exports.walletLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max: 10,
+  windowMs: 60 * 1000,
+  max: isDev ? 120 : 120,
+  skip: skipLocalhost,
   message: { error: 'Too many top-up requests' }
 });

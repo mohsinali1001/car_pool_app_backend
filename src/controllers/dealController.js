@@ -1,5 +1,5 @@
 const { db } = require('../config/firebase');
-const { deductBalance, addBalance } = require('../utils/walletHelper');
+const { deductBalance, addBalance, ensureWallet } = require('../utils/walletHelper');
 const { pushToUser } = require('../utils/notificationHelper');
 const { RIDE_STATUS, DEAL_STATUS, ACTIVE_DEAL_STATUSES } = require('../constants/statuses');
 
@@ -254,8 +254,8 @@ const confirmDeal = async (req, res) => {
 
     const commission = parseFloat(deal.agreedFare || 0) * PLATFORM_FEE_PERCENT;
     const walletRef = db.collection('wallets').doc(uid);
-    const walletSnap = await walletRef.get();
-    const currentBalance = walletSnap.exists ? Number(walletSnap.data().balance || 0) : 0;
+    const wallet = await ensureWallet(uid);
+    const currentBalance = Number(wallet.balance || 0);
 
     if (currentBalance < commission) {
       return res.status(400).json({
