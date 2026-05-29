@@ -1,5 +1,6 @@
 const { db } = require('../config/firebase');
 const { pushToUser } = require('../utils/notificationHelper');
+const { normalizeRouteLabels } = require('../utils/aiLocationHelper');
 
 function parseNumber(value) {
   const n = Number(value);
@@ -28,6 +29,18 @@ function distanceKm(aLat, aLng, bLat, bLng) {
   return earthKm * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
 }
 
+function isValidLat(value) {
+  return value != null && value >= -90 && value <= 90;
+}
+
+function isValidLng(value) {
+  return value != null && value >= -180 && value <= 180;
+}
+
+function isZeroCoordinate(lat, lng) {
+  return Number(lat) === 0 && Number(lng) === 0;
+}
+
 async function attachOffers(request) {
   const snap = await db
     .collection('customerRideOffers')
@@ -53,30 +66,50 @@ const createCustomerRequest = async (req, res) => {
     startLng,
     endLat,
     endLng,
+    pickupLat,
+    pickupLng,
+    dropLat,
+    dropLng,
     customerLat,
     customerLng,
     city,
   } = req.body;
 
-  const parsedStartLat = parseNumber(startLat);
-  const parsedStartLng = parseNumber(startLng);
-  const parsedEndLat = parseNumber(endLat);
-  const parsedEndLng = parseNumber(endLng);
+  const rawStartLocation = String(startLocation || pickupLocation || '').trim();
+  const rawEndLocation = String(endLocation || dropLocation || '').trim();
+  const parsedStartLat = parseNumber(startLat ?? pickupLat);
+  const parsedStartLng = parseNumber(startLng ?? pickupLng);
+  const parsedEndLat = parseNumber(endLat ?? dropLat);
+  const parsedEndLng = parseNumber(endLng ?? dropLng);
+  const parsedRequestedAt = requestedAt
+    ? new Date(requestedAt)
+    : new Date(Date.now() + 60 * 60 * 1000);
 
-  if (!startLocation || !endLocation || !requestedAt) {
+  if (!rawStartLocation || !rawEndLocation) {
     return res.status(400).json({
       success: false,
-      error: 'startLocation, endLocation and requestedAt are required',
+      error: 'startLocation and endLocation are required',
       code: 'MISSING_FIELDS',
     });
   }
 
-  if ([parsedStartLat, parsedStartLng, parsedEndLat, parsedEndLng].some((v) => v == null)) {
+  if (
+    !isValidLat(parsedStartLat) ||
+    !isValidLng(parsedStartLng) ||
+    !isValidLat(parsedEndLat) ||
+    !isValidLng(parsedEndLng) ||
+    isZeroCoordinate(parsedStartLat, parsedStartLng) ||
+    isZeroCoordinate(parsedEndLat, parsedEndLng)
+  ) {
     return res.status(400).json({
       success: false,
       error: 'Map pickup and drop coordinates are required',
       code: 'MAP_COORDINATES_REQUIRED',
     });
+  }
+
+  if (Number.isNaN(parsedRequestedAt.getTime())) {
+    return res.status(400).json({ success: false, error: 'requestedAt is invalid', code: 'INVALID_REQUESTED_AT' });
   }
 
   try {
@@ -94,6 +127,14 @@ const createCustomerRequest = async (req, res) => {
       return res.status(400).json({ success: false, error: 'rideMode must be solo or share', code: 'INVALID_RIDE_MODE' });
     }
 
+    const normalizedLabels = await normalizeRouteLabels({
+      startLocation: rawStartLocation,
+      endLocation: rawEndLocation,
+      exactPickup: pickupLocation,
+      exactDrop: dropLocation,
+      city: city || user.city,
+    });
+
     const now = new Date().toISOString();
     const ref = db.collection('customerRideRequests').doc();
     const request = {
@@ -101,11 +142,11 @@ const createCustomerRequest = async (req, res) => {
       customerId: uid,
       customerName: user.name || 'Customer',
       customerPhone: user.phone || '',
-      startLocation: String(startLocation).trim(),
-      endLocation: String(endLocation).trim(),
-      pickupLocation: String(pickupLocation || startLocation).trim(),
-      dropLocation: String(dropLocation || endLocation).trim(),
-      requestedAt: new Date(requestedAt).toISOString(),
+      startLocation: normalizedLabels.startLocation,
+      endLocation: normalizedLabels.endLocation,
+      pickupLocation: String(pickupLocation || rawStartLocation).trim(),
+      dropLocation: String(dropLocation || rawEndLocation).trim(),
+      requestedAt: parsedRequestedAt.toISOString(),
       vehicleType: normalizedVehicleType,
       rideMode: normalizedRideMode,
       desiredFare: parseNumber(desiredFare),
@@ -184,7 +225,7 @@ const getOpenCustomerRequests = async (req, res) => {
       return !['completed', 'cancelled', 'deleted'].includes(status);
     });
     if (captainLat != null && captainLng != null) {
-      requests = requests.filter((r) => r.distanceKm == null || r.distanceKm <= radiusKm);
+      requests = requests.filter((r) => r.distanceKm != null && r.distanceKm <= radiusKm);
     }
     requests = requests.filter((r) => r.status !== 'accepted' || r.acceptedCaptainId === uid);
     requests.sort((a, b) => {

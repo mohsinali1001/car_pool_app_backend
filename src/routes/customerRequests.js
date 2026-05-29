@@ -10,6 +10,7 @@ const {
 
 router.post('/', verifyToken, createCustomerRequest);
 router.get('/my', verifyToken, getMyCustomerRequests);
+router.get('/nearby', verifyToken, requireCaptain, getOpenCustomerRequests);
 router.get('/', verifyToken, requireCaptain, getOpenCustomerRequests);
 router.post('/:requestId/offers', verifyToken, requireCaptain, createOffer);
 router.patch('/:requestId/offers/:offerId', verifyToken, respondOffer);

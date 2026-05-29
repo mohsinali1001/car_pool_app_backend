@@ -1,6 +1,7 @@
 const { db } = require('../config/firebase');
 const { getBalance } = require('../utils/walletHelper');
 const { pushToUser } = require('../utils/notificationHelper');
+const { normalizeRouteLabels } = require('../utils/aiLocationHelper');
 
 // Helper function to parse numbers
 function parseNumber(value) {
@@ -22,6 +23,18 @@ function distanceKm(aLat, aLng, bLat, bLng) {
     Math.cos(lat1) * Math.cos(lat2) *
       Math.sin(dLng / 2) * Math.sin(dLng / 2);
   return earthKm * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+function isValidLat(value) {
+  return value != null && value >= -90 && value <= 90;
+}
+
+function isValidLng(value) {
+  return value != null && value >= -180 && value <= 180;
+}
+
+function isZeroCoordinate(lat, lng) {
+  return Number(lat) === 0 && Number(lng) === 0;
 }
 
 const postRide = async (req, res) => {
@@ -93,15 +106,54 @@ const postRide = async (req, res) => {
       }
     }
 
-    // Required fields check
     if (!startLocation || !endLocation || !departureTime || !totalSeats || !suggestedFare) {
       return res.status(400).json({ success: false, error: 'Missing required fields', code: 'MISSING_FIELDS' });
+    }
+
+    const parsedStartLat = parseNumber(startLat);
+    const parsedStartLng = parseNumber(startLng);
+    const parsedEndLat = parseNumber(endLat);
+    const parsedEndLng = parseNumber(endLng);
+    if (
+      !isValidLat(parsedStartLat) ||
+      !isValidLng(parsedStartLng) ||
+      !isValidLat(parsedEndLat) ||
+      !isValidLng(parsedEndLng) ||
+      isZeroCoordinate(parsedStartLat, parsedStartLng) ||
+      isZeroCoordinate(parsedEndLat, parsedEndLng)
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: 'Valid map pickup and drop coordinates are required',
+        code: 'MAP_COORDINATES_REQUIRED',
+      });
+    }
+
+    const parsedDeparture = new Date(departureTime);
+    if (Number.isNaN(parsedDeparture.getTime())) {
+      return res.status(400).json({ success: false, error: 'departureTime is invalid', code: 'INVALID_DEPARTURE_TIME' });
+    }
+    if (parsedDeparture <= new Date()) {
+      return res.status(400).json({ success: false, error: 'departureTime must be in the future', code: 'PAST_DEPARTURE_TIME' });
     }
 
     const parsedSeats = parseInt(totalSeats, 10);
     if (!Number.isInteger(parsedSeats) || parsedSeats < 1) {
       return res.status(400).json({ success: false, error: 'totalSeats must be at least 1', code: 'INVALID_TOTAL_SEATS' });
     }
+
+    const parsedFare = parseNumber(suggestedFare);
+    if (!parsedFare || parsedFare <= 0) {
+      return res.status(400).json({ success: false, error: 'suggestedFare must be greater than 0', code: 'INVALID_FARE' });
+    }
+
+    const normalizedLabels = await normalizeRouteLabels({
+      startLocation,
+      endLocation,
+      exactPickup: exactLocation,
+      exactDrop: exactDropLocation,
+      city: userData.city,
+    });
 
     // Build ride object
     const ride = {
@@ -110,19 +162,19 @@ const postRide = async (req, res) => {
       captainPhone: userData.phone || '',
       captainRating: userData.rating || 5.0,
       captainGender: (userData.gender || '').toString().toLowerCase() || null,
-      startLocation: startLocation.trim(),
-      endLocation: endLocation.trim(),
+      startLocation: normalizedLabels.startLocation,
+      endLocation: normalizedLabels.endLocation,
       exactLocation: (exactLocation || '').toString().trim() || null,
       exactDropLocation: (exactDropLocation || '').toString().trim() || null,
-      startLat: parseFloat(startLat) || 0.0,
-      startLng: parseFloat(startLng) || 0.0,
-      endLat: parseFloat(endLat) || 0.0,
-      endLng: parseFloat(endLng) || 0.0,
-      departureTime: new Date(departureTime).toISOString(),
+      startLat: parsedStartLat,
+      startLng: parsedStartLng,
+      endLat: parsedEndLat,
+      endLng: parsedEndLng,
+      departureTime: parsedDeparture.toISOString(),
       totalSeats: parsedSeats,
       availableSeats: parsedSeats,
       full: false,
-      suggestedFare: parseFloat(suggestedFare),
+      suggestedFare: parsedFare,
       rideType: normalizedRideType,
       rideMode: normalizedRideMode,
       vehicleType: inferredVehicleType === 'shazore' ? 'truck' : inferredVehicleType,
@@ -258,7 +310,7 @@ const getActiveRides = async (req, res) => {
           ...r,
           distanceKm: distanceKm(userLat, userLng, parseNumber(r.startLat), parseNumber(r.startLng)),
         }))
-        .filter((r) => r.distanceKm == null || r.distanceKm <= radiusKm)
+        .filter((r) => r.distanceKm != null && r.distanceKm <= radiusKm)
         .sort((a, b) => {
           const ad = a.distanceKm == null ? Number.MAX_SAFE_INTEGER : a.distanceKm;
           const bd = b.distanceKm == null ? Number.MAX_SAFE_INTEGER : b.distanceKm;

@@ -10,6 +10,7 @@ const {
 } = require('../controllers/rideController');
 
 router.post('/', verifyToken, requireCaptain, postRide);
+router.get('/active', verifyToken, getActiveRides);
 router.get('/', verifyToken, getActiveRides);
 router.get('/my-rides', verifyToken, requireCaptain, getMyRides);
 router.get('/:rideId', verifyToken, getRideById);
