@@ -1,16 +1,13 @@
 const https = require('https');
+const { clean, labelFromLocation } = require('./locationLabelHelper');
 
 const GROQ_HOST = 'api.groq.com';
 const GROQ_PATH = '/openai/v1/chat/completions';
 
-function clean(value) {
-  return (value || '').toString().trim();
-}
-
 function fallbackLabels(input) {
   return {
-    startLocation: clean(input.startLocation),
-    endLocation: clean(input.endLocation),
+    startLocation: labelFromLocation(input.startLocation),
+    endLocation: labelFromLocation(input.endLocation),
   };
 }
 
@@ -83,8 +80,8 @@ async function normalizeRouteLabels(input) {
         content: JSON.stringify({
           startLocation: fallback.startLocation,
           endLocation: fallback.endLocation,
-          exactPickup: clean(input.exactPickup),
-          exactDrop: clean(input.exactDrop),
+          exactPickup: labelFromLocation(input.exactPickup),
+          exactDrop: labelFromLocation(input.exactDrop),
           city: clean(input.city),
         }),
       },

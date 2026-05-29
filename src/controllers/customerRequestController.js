@@ -1,6 +1,7 @@
 const { db } = require('../config/firebase');
 const { pushToUser } = require('../utils/notificationHelper');
 const { normalizeRouteLabels } = require('../utils/aiLocationHelper');
+const { labelFromLocation } = require('../utils/locationLabelHelper');
 
 function parseNumber(value) {
   const n = Number(value);
@@ -75,8 +76,10 @@ const createCustomerRequest = async (req, res) => {
     city,
   } = req.body;
 
-  const rawStartLocation = String(startLocation || pickupLocation || '').trim();
-  const rawEndLocation = String(endLocation || dropLocation || '').trim();
+  const rawPickupLocation = labelFromLocation(pickupLocation);
+  const rawDropLocation = labelFromLocation(dropLocation);
+  const rawStartLocation = labelFromLocation(startLocation) || rawPickupLocation;
+  const rawEndLocation = labelFromLocation(endLocation) || rawDropLocation;
   const parsedStartLat = parseNumber(startLat ?? pickupLat);
   const parsedStartLng = parseNumber(startLng ?? pickupLng);
   const parsedEndLat = parseNumber(endLat ?? dropLat);
@@ -118,6 +121,7 @@ const createCustomerRequest = async (req, res) => {
       return res.status(404).json({ success: false, error: 'User not found', code: 'USER_NOT_FOUND' });
     }
     const user = userDoc.data();
+    const customerGender = (user.gender || '').toString().trim().toLowerCase();
     const normalizedVehicleType = String(vehicleType || 'car').toLowerCase();
     const normalizedRideMode = String(rideMode || 'solo').toLowerCase();
     if (!['car', 'bike', 'bus', 'truck', 'shazore'].includes(normalizedVehicleType)) {
@@ -144,8 +148,10 @@ const createCustomerRequest = async (req, res) => {
       customerPhone: user.phone || '',
       startLocation: normalizedLabels.startLocation,
       endLocation: normalizedLabels.endLocation,
-      pickupLocation: String(pickupLocation || rawStartLocation).trim(),
-      dropLocation: String(dropLocation || rawEndLocation).trim(),
+      pickupLocation: rawPickupLocation || rawStartLocation,
+      dropLocation: rawDropLocation || rawEndLocation,
+      customerGender: customerGender || null,
+      isLadiesRequest: customerGender === 'female',
       requestedAt: parsedRequestedAt.toISOString(),
       vehicleType: normalizedVehicleType,
       rideMode: normalizedRideMode,
@@ -174,6 +180,8 @@ const createCustomerRequest = async (req, res) => {
       const captainsSnap = await db.collection('users').where('role', '==', 'captain').get();
       const targets = captainsSnap.docs.filter((doc) => {
         const captain = doc.data() || {};
+        const captainGender = (captain.gender || '').toString().trim().toLowerCase();
+        if (request.isLadiesRequest && captainGender !== 'female') return false;
         return Boolean(captain.fcmToken);
       });
       await Promise.all(targets.map((doc) =>
@@ -220,6 +228,10 @@ const getOpenCustomerRequests = async (req, res) => {
       request.isNearby = km != null && km <= radiusKm;
       return request;
     });
+    const captainGender = (captain.gender || '').toString().trim().toLowerCase();
+    if (captainGender !== 'female') {
+      requests = requests.filter((r) => r.isLadiesRequest !== true);
+    }
     requests = requests.filter((r) => {
       const status = (r.status || '').toString().toLowerCase();
       return !['completed', 'cancelled', 'deleted'].includes(status);
@@ -352,8 +364,9 @@ const respondOffer = async (req, res) => {
     }
 
     const now = new Date().toISOString();
-    const pickupUpdate = pickupLocation && String(pickupLocation).trim()
-      ? { pickupLocation: String(pickupLocation).trim() }
+    const pickupLabel = labelFromLocation(pickupLocation);
+    const pickupUpdate = pickupLabel
+      ? { pickupLocation: pickupLabel }
       : {};
     if (action === 'accept') {
       await requestRef.update({

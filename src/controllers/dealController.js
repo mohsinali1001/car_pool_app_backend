@@ -2,6 +2,7 @@ const { db } = require('../config/firebase');
 const { deductBalance, addBalance, ensureWallet } = require('../utils/walletHelper');
 const { pushToUser } = require('../utils/notificationHelper');
 const { RIDE_STATUS, DEAL_STATUS, ACTIVE_DEAL_STATUSES } = require('../constants/statuses');
+const { labelFromLocation } = require('../utils/locationLabelHelper');
 
 const PLATFORM_FEE_PERCENT = 0.05;
 
@@ -132,7 +133,9 @@ const createDeal = async (req, res) => {
 
   const pickupLat = parseCoord(passengerPickupLat);
   const pickupLng = parseCoord(passengerPickupLng);
-  if (pickupLat == null || pickupLng == null || !passengerPickupAddress) {
+  const pickupAddress = labelFromLocation(passengerPickupAddress);
+  const dropAddress = labelFromLocation(passengerDropAddress);
+  if (pickupLat == null || pickupLng == null || !pickupAddress) {
     return res.status(400).json({
       success: false,
       error: 'Passenger pickup location is required',
@@ -205,10 +208,10 @@ const createDeal = async (req, res) => {
         customerMessage: customerMessage || '',
         passengerPickupLat: pickupLat,
         passengerPickupLng: pickupLng,
-        passengerPickupAddress: String(passengerPickupAddress).trim(),
+        passengerPickupAddress: pickupAddress,
         passengerDropLat: dropLat ?? rideData.endLat ?? 0,
         passengerDropLng: dropLng ?? rideData.endLng ?? 0,
-        passengerDropAddress: (passengerDropAddress || rideData.endLocation || '').trim(),
+        passengerDropAddress: dropAddress || labelFromLocation(rideData.endLocation),
         pickupOrder: null,
         boardingStatus: 'waiting',
         rating: null,

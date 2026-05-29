@@ -2,6 +2,7 @@ const { db } = require('../config/firebase');
 const { getBalance } = require('../utils/walletHelper');
 const { pushToUser } = require('../utils/notificationHelper');
 const { normalizeRouteLabels } = require('../utils/aiLocationHelper');
+const { labelFromLocation } = require('../utils/locationLabelHelper');
 
 // Helper function to parse numbers
 function parseNumber(value) {
@@ -106,7 +107,12 @@ const postRide = async (req, res) => {
       }
     }
 
-    if (!startLocation || !endLocation || !departureTime || !totalSeats || !suggestedFare) {
+    const rawStartLocation = labelFromLocation(startLocation);
+    const rawEndLocation = labelFromLocation(endLocation);
+    const rawExactLocation = labelFromLocation(exactLocation);
+    const rawExactDropLocation = labelFromLocation(exactDropLocation);
+
+    if (!rawStartLocation || !rawEndLocation || !departureTime || !totalSeats || !suggestedFare) {
       return res.status(400).json({ success: false, error: 'Missing required fields', code: 'MISSING_FIELDS' });
     }
 
@@ -148,10 +154,10 @@ const postRide = async (req, res) => {
     }
 
     const normalizedLabels = await normalizeRouteLabels({
-      startLocation,
-      endLocation,
-      exactPickup: exactLocation,
-      exactDrop: exactDropLocation,
+      startLocation: rawStartLocation,
+      endLocation: rawEndLocation,
+      exactPickup: rawExactLocation,
+      exactDrop: rawExactDropLocation,
       city: userData.city,
     });
 
@@ -164,8 +170,8 @@ const postRide = async (req, res) => {
       captainGender: (userData.gender || '').toString().toLowerCase() || null,
       startLocation: normalizedLabels.startLocation,
       endLocation: normalizedLabels.endLocation,
-      exactLocation: (exactLocation || '').toString().trim() || null,
-      exactDropLocation: (exactDropLocation || '').toString().trim() || null,
+      exactLocation: rawExactLocation || null,
+      exactDropLocation: rawExactDropLocation || null,
       startLat: parsedStartLat,
       startLng: parsedStartLng,
       endLat: parsedEndLat,
