@@ -166,10 +166,9 @@ const getOpenCustomerRequests = async (req, res) => {
       request.isNearby = km != null && km <= radiusKm;
       return request;
     });
-    const now = new Date();
     requests = requests.filter((r) => {
-      const requested = r.requestedAt ? new Date(r.requestedAt) : null;
-      return !requested || Number.isNaN(requested.getTime()) || requested >= now;
+      const status = (r.status || '').toString().toLowerCase();
+      return !['completed', 'cancelled', 'deleted'].includes(status);
     });
     if (captainLat != null && captainLng != null) {
       requests = requests.filter((r) => r.distanceKm == null || r.distanceKm <= radiusKm);
