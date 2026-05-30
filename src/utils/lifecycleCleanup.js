@@ -31,18 +31,34 @@ async function cleanupExpiredRides() {
 
     const completedAt = now.toISOString();
     const dealsSnap = await db.collection('deals').where('rideId', '==', doc.id).get();
+    const deals = dealsSnap.docs.map((dealDoc) => ({
+      ref: dealDoc.ref,
+      data: dealDoc.data() || {},
+    }));
+    const hasConfirmedDeal = deals.some((deal) =>
+      [DEAL_STATUS.CONFIRMED, DEAL_STATUS.STARTED, DEAL_STATUS.COMPLETED].includes(deal.data.status),
+    );
 
-    for (const dealDoc of dealsSnap.docs) {
-      const deal = dealDoc.data() || {};
-      if ([DEAL_STATUS.CONFIRMED, DEAL_STATUS.STARTED].includes(deal.status)) {
-        batch.update(dealDoc.ref, {
+    if (!hasConfirmedDeal) {
+      for (const deal of deals) {
+        batch.delete(deal.ref);
+        writes += 1;
+      }
+      batch.delete(doc.ref);
+      writes += 1;
+      continue;
+    }
+
+    for (const deal of deals) {
+      if ([DEAL_STATUS.CONFIRMED, DEAL_STATUS.STARTED].includes(deal.data.status)) {
+        batch.update(deal.ref, {
           status: DEAL_STATUS.COMPLETED,
           completedAt,
           updatedAt: completedAt,
         });
         writes += 1;
-      } else if (deal.status === DEAL_STATUS.PENDING) {
-        batch.update(dealDoc.ref, {
+      } else if (deal.data.status === DEAL_STATUS.PENDING) {
+        batch.update(deal.ref, {
           status: DEAL_STATUS.CANCELLED,
           updatedAt: completedAt,
         });
@@ -114,22 +130,12 @@ async function cleanupExpiredCustomerRequests() {
         writes += 1;
       }
     } else {
-      batch.update(doc.ref, {
-        status: 'expired',
-        updatedAt: completedAt,
-      });
-      writes += 1;
-
       for (const offerDoc of offersSnap.docs) {
-        const offer = offerDoc.data() || {};
-        if (['offered', 'countered'].includes(offer.status)) {
-          batch.update(offerDoc.ref, {
-            status: 'expired',
-            updatedAt: completedAt,
-          });
-          writes += 1;
-        }
+        batch.delete(offerDoc.ref);
+        writes += 1;
       }
+      batch.delete(doc.ref);
+      writes += 1;
     }
   }
 
