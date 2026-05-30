@@ -3,6 +3,7 @@ const { getBalance } = require('../utils/walletHelper');
 const { pushToUser } = require('../utils/notificationHelper');
 const { normalizeRouteLabels } = require('../utils/aiLocationHelper');
 const { labelFromLocation } = require('../utils/locationLabelHelper');
+const { DEAL_STATUS } = require('../constants/statuses');
 
 // Helper function to parse numbers
 function parseNumber(value) {
@@ -36,6 +37,41 @@ function isValidLng(value) {
 
 function isZeroCoordinate(lat, lng) {
   return Number(lat) === 0 && Number(lng) === 0;
+}
+
+async function cleanupExpiredPublicRides() {
+  const now = new Date();
+  const snap = await db
+    .collection('rides')
+    .where('status', 'in', ['active', 'filled'])
+    .limit(100)
+    .get();
+
+  const batch = db.batch();
+  let writes = 0;
+
+  for (const doc of snap.docs) {
+    const ride = doc.data() || {};
+    const departure = new Date(ride.departureTime || '');
+    if (Number.isNaN(departure.getTime()) || departure >= now) continue;
+
+    const dealsSnap = await db.collection('deals').where('rideId', '==', doc.id).get();
+    const deals = dealsSnap.docs.map((d) => ({ ref: d.ref, data: d.data() || {} }));
+    const keepRide = deals.some((d) =>
+      [DEAL_STATUS.CONFIRMED, DEAL_STATUS.STARTED, DEAL_STATUS.COMPLETED].includes(d.data.status),
+    );
+
+    if (keepRide) continue;
+
+    for (const deal of deals) {
+      batch.delete(deal.ref);
+      writes += 1;
+    }
+    batch.delete(doc.ref);
+    writes += 1;
+  }
+
+  if (writes > 0) await batch.commit();
 }
 
 const postRide = async (req, res) => {
@@ -264,6 +300,7 @@ const postRide = async (req, res) => {
 const getActiveRides = async (req, res) => {
   const { rideType, startLocation, endLocation, rideMode } = req.query;
   try {
+    await cleanupExpiredPublicRides();
     const userLat = parseNumber(req.query.lat);
     const userLng = parseNumber(req.query.lng);
     let requesterGender = '';
@@ -369,6 +406,7 @@ const getMyRides = async (req, res) => {
   if (!uid) return res.status(400).json({ success: false, error: 'Captain ID is required', code: 'MISSING_CAPTAIN_ID' });
   
   try {
+    await cleanupExpiredPublicRides();
     const snap = await db.collection('rides').where('captainId', '==', uid).orderBy('createdAt', 'desc').get();
     const rides = snap.docs.map(d => ({ id: d.id, ...d.data() }));
     return res.json({ success: true, rides });
@@ -380,6 +418,7 @@ const getMyRides = async (req, res) => {
 const getRideById = async (req, res) => {
   const { rideId } = req.params;
   try {
+    await cleanupExpiredPublicRides();
     const rideDoc = await db.collection('rides').doc(rideId).get();
     if (!rideDoc.exists) return res.status(404).json({ success: false, error: 'Ride not found', code: 'RIDE_NOT_FOUND' });
     return res.json({ success: true, ride: { id: rideDoc.id, ...rideDoc.data() } });

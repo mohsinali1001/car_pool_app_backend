@@ -52,6 +52,45 @@ async function attachOffers(request) {
   return request;
 }
 
+async function cleanupExpiredOpenRequests() {
+  const now = new Date();
+  const snap = await db
+    .collection('customerRideRequests')
+    .where('status', 'in', ['open', 'countered'])
+    .limit(100)
+    .get();
+
+  const batch = db.batch();
+  let writes = 0;
+
+  for (const doc of snap.docs) {
+    const request = doc.data() || {};
+    const requestedAt = new Date(request.requestedAt || '');
+    if (Number.isNaN(requestedAt.getTime()) || requestedAt >= now) continue;
+
+    const offersSnap = await db
+      .collection('customerRideOffers')
+      .where('requestId', '==', doc.id)
+      .get();
+    for (const offer of offersSnap.docs) {
+      batch.delete(offer.ref);
+      writes += 1;
+    }
+    batch.delete(doc.ref);
+    writes += 1;
+  }
+
+  if (writes > 0) await batch.commit();
+}
+
+function requestDistance(captainLat, captainLng, request) {
+  const km = distanceKm(captainLat, captainLng, request.startLat, request.startLng);
+  return {
+    distanceKm: km == null ? null : Number(km.toFixed(2)),
+    isNearby: km != null && km <= 20,
+  };
+}
+
 const createCustomerRequest = async (req, res) => {
   const uid = req.user.uid;
   const {
@@ -180,8 +219,6 @@ const createCustomerRequest = async (req, res) => {
       const captainsSnap = await db.collection('users').where('role', '==', 'captain').get();
       const targets = captainsSnap.docs.filter((doc) => {
         const captain = doc.data() || {};
-        const captainGender = (captain.gender || '').toString().trim().toLowerCase();
-        if (request.isLadiesRequest && captainGender !== 'female') return false;
         return Boolean(captain.fcmToken);
       });
       await Promise.all(targets.map((doc) =>
@@ -205,6 +242,7 @@ const createCustomerRequest = async (req, res) => {
 const getOpenCustomerRequests = async (req, res) => {
   const uid = req.user.uid;
   try {
+    await cleanupExpiredOpenRequests();
     const captainDoc = await db.collection('users').doc(uid).get();
     if (!captainDoc.exists) {
       return res.status(404).json({ success: false, error: 'Captain not found', code: 'USER_NOT_FOUND' });
@@ -212,8 +250,6 @@ const getOpenCustomerRequests = async (req, res) => {
     const captain = captainDoc.data();
     const captainLat = parseNumber(req.query.lat);
     const captainLng = parseNumber(req.query.lng);
-    const radiusKm = parseNumber(req.query.radiusKm) || 20;
-
     const snap = await db
       .collection('customerRideRequests')
       .where('status', 'in', ['open', 'countered', 'accepted'])
@@ -223,22 +259,12 @@ const getOpenCustomerRequests = async (req, res) => {
 
     let requests = snap.docs.map((d) => {
       const request = { id: d.id, ...d.data() };
-      const km = distanceKm(captainLat, captainLng, request.startLat, request.startLng);
-      request.distanceKm = km == null ? null : Number(km.toFixed(2));
-      request.isNearby = km != null && km <= radiusKm;
-      return request;
+      return { ...request, ...requestDistance(captainLat, captainLng, request) };
     });
-    const captainGender = (captain.gender || '').toString().trim().toLowerCase();
-    if (captainGender !== 'female') {
-      requests = requests.filter((r) => r.isLadiesRequest !== true);
-    }
     requests = requests.filter((r) => {
       const status = (r.status || '').toString().toLowerCase();
       return !['completed', 'cancelled', 'deleted'].includes(status);
     });
-    if (captainLat != null && captainLng != null) {
-      requests = requests.filter((r) => r.distanceKm != null && r.distanceKm <= radiusKm);
-    }
     requests = requests.filter((r) => r.status !== 'accepted' || r.acceptedCaptainId === uid);
     requests.sort((a, b) => {
       if (a.isNearby !== b.isNearby) return a.isNearby ? -1 : 1;
@@ -256,6 +282,7 @@ const getOpenCustomerRequests = async (req, res) => {
 
 const getMyCustomerRequests = async (req, res) => {
   try {
+    await cleanupExpiredOpenRequests();
     const snap = await db
       .collection('customerRideRequests')
       .where('customerId', '==', req.user.uid)
