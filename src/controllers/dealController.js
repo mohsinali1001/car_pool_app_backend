@@ -3,6 +3,7 @@ const { deductBalance, addBalance, ensureWallet } = require('../utils/walletHelp
 const { pushToUser } = require('../utils/notificationHelper');
 const { RIDE_STATUS, DEAL_STATUS, ACTIVE_DEAL_STATUSES } = require('../constants/statuses');
 const { labelFromLocation } = require('../utils/locationLabelHelper');
+const { cleanupExpiredRides } = require('../utils/lifecycleCleanup');
 
 const PLATFORM_FEE_PERCENT = 0.05;
 
@@ -550,6 +551,7 @@ const completeDeal = async (req, res) => {
 
 const getDeal = async (req, res) => {
   try {
+    await cleanupExpiredRides();
     const doc = await db.collection('deals').doc(req.params.dealId).get();
     if (!doc.exists) {
       return res.status(404).json({ success: false, error: 'Deal not found', code: 'DEAL_NOT_FOUND' });
@@ -638,6 +640,7 @@ const rateDeal = async (req, res) => {
 
 const getMyBookings = async (req, res) => {
   try {
+    await cleanupExpiredRides();
     const snap = await db
       .collection('deals')
       .where('customerId', '==', req.user.uid)
@@ -786,6 +789,7 @@ const updateBoardingStatus = async (req, res) => {
 const getRideDeals = async (req, res) => {
   const { rideId } = req.params;
   try {
+    await cleanupExpiredRides();
     const rideDoc = await db.collection('rides').doc(rideId).get();
     if (!rideDoc.exists) {
       return res.status(404).json({ success: false, error: 'Ride not found', code: 'RIDE_NOT_FOUND' });

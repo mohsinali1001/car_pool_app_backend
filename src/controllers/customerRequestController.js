@@ -2,6 +2,7 @@ const { db } = require('../config/firebase');
 const { pushToUser } = require('../utils/notificationHelper');
 const { normalizeRouteLabels } = require('../utils/aiLocationHelper');
 const { labelFromLocation } = require('../utils/locationLabelHelper');
+const { cleanupExpiredCustomerRequests } = require('../utils/lifecycleCleanup');
 
 function parseNumber(value) {
   const n = Number(value);
@@ -50,37 +51,6 @@ async function attachOffers(request) {
     .get();
   request.offers = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
   return request;
-}
-
-async function cleanupExpiredOpenRequests() {
-  const now = new Date();
-  const snap = await db
-    .collection('customerRideRequests')
-    .where('status', 'in', ['open', 'countered'])
-    .limit(100)
-    .get();
-
-  const batch = db.batch();
-  let writes = 0;
-
-  for (const doc of snap.docs) {
-    const request = doc.data() || {};
-    const requestedAt = new Date(request.requestedAt || '');
-    if (Number.isNaN(requestedAt.getTime()) || requestedAt >= now) continue;
-
-    const offersSnap = await db
-      .collection('customerRideOffers')
-      .where('requestId', '==', doc.id)
-      .get();
-    for (const offer of offersSnap.docs) {
-      batch.delete(offer.ref);
-      writes += 1;
-    }
-    batch.delete(doc.ref);
-    writes += 1;
-  }
-
-  if (writes > 0) await batch.commit();
 }
 
 function requestDistance(captainLat, captainLng, request) {
@@ -242,7 +212,7 @@ const createCustomerRequest = async (req, res) => {
 const getOpenCustomerRequests = async (req, res) => {
   const uid = req.user.uid;
   try {
-    await cleanupExpiredOpenRequests();
+    await cleanupExpiredCustomerRequests();
     const captainDoc = await db.collection('users').doc(uid).get();
     if (!captainDoc.exists) {
       return res.status(404).json({ success: false, error: 'Captain not found', code: 'USER_NOT_FOUND' });
@@ -252,7 +222,7 @@ const getOpenCustomerRequests = async (req, res) => {
     const captainLng = parseNumber(req.query.lng);
     const snap = await db
       .collection('customerRideRequests')
-      .where('status', 'in', ['open', 'countered', 'accepted'])
+      .where('status', 'in', ['open', 'countered', 'accepted', 'completed'])
       .orderBy('createdAt', 'desc')
       .limit(100)
       .get();
@@ -263,9 +233,9 @@ const getOpenCustomerRequests = async (req, res) => {
     });
     requests = requests.filter((r) => {
       const status = (r.status || '').toString().toLowerCase();
-      return !['completed', 'cancelled', 'deleted'].includes(status);
+      if (['accepted', 'completed'].includes(status)) return r.acceptedCaptainId === uid;
+      return !['cancelled', 'deleted', 'expired'].includes(status);
     });
-    requests = requests.filter((r) => r.status !== 'accepted' || r.acceptedCaptainId === uid);
     requests.sort((a, b) => {
       if (a.isNearby !== b.isNearby) return a.isNearby ? -1 : 1;
       const byDistance = distanceScore(captainLat, captainLng, a.startLat, a.startLng) -
@@ -282,7 +252,7 @@ const getOpenCustomerRequests = async (req, res) => {
 
 const getMyCustomerRequests = async (req, res) => {
   try {
-    await cleanupExpiredOpenRequests();
+    await cleanupExpiredCustomerRequests();
     const snap = await db
       .collection('customerRideRequests')
       .where('customerId', '==', req.user.uid)
@@ -391,18 +361,31 @@ const respondOffer = async (req, res) => {
       ? { pickupLocation: pickupLabel }
       : {};
     if (action === 'accept') {
-      await requestRef.update({
+      const offersSnap = await db
+        .collection('customerRideOffers')
+        .where('requestId', '==', requestId)
+        .get();
+      const batch = db.batch();
+      batch.update(requestRef, {
         status: 'accepted',
         finalFare: offer.counterFare || offer.fare,
         acceptedOfferId: offerId,
         acceptedCaptainId: offer.captainId,
+        acceptedCaptainName: offer.captainName || '',
         acceptedCaptainPhone: offer.captainPhone || '',
         captainPhoneRevealed: true,
         customerPhoneRevealed: true,
         ...pickupUpdate,
         updatedAt: now,
       });
-      await offerRef.update({ status: 'accepted', phoneRevealed: true, updatedAt: now });
+      for (const offerDoc of offersSnap.docs) {
+        batch.update(offerDoc.ref, {
+          status: offerDoc.id === offerId ? 'accepted' : 'cancelled',
+          phoneRevealed: offerDoc.id === offerId,
+          updatedAt: now,
+        });
+      }
+      await batch.commit();
       await pushToUser(offer.captainId, {
         title: 'Offer Accepted',
         body: `${request.customerName} accepted your fare. Contact number is now available.`,
