@@ -1,6 +1,12 @@
 const router = require('express').Router();
 const { verifyToken, requireCaptain } = require('../middleware/auth');
-const { syncUser, getProfile, updateProfile, updateFcmToken } = require('../controllers/authController');
+const {
+  syncUser,
+  getProfile,
+  updateProfile,
+  updateFcmToken,
+  updateOnlineStatus,
+} = require('../controllers/authController');
 
 // ============= AUTH ROUTES =============
 
@@ -8,6 +14,7 @@ router.post('/sync', verifyToken, syncUser);
 router.get('/profile', verifyToken, getProfile);
 router.patch('/profile', verifyToken, updateProfile);
 router.patch('/fcm-token', verifyToken, updateFcmToken);
+router.patch('/status', verifyToken, updateOnlineStatus);
 
 // ============= CAPTAIN SPECIFIC ROUTES =============
 

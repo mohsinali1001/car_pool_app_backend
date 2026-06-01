@@ -38,6 +38,14 @@ exports.authLimiter = rateLimit({
   message: { error: 'Too many auth requests' },
 });
 
+// Customer request offers — prevent spam
+exports.offerLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: isDev ? 30 : 10,
+  skip: skipLocalhost,
+  message: { error: 'Too many offers, try again later' },
+});
+
 // Wallet is polled by the app so balance updates appear immediately.
 exports.walletLimiter = rateLimit({
   windowMs: 60 * 1000,

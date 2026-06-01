@@ -1,5 +1,6 @@
 const { db } = require('../config/firebase');
 const { DEAL_STATUS, RIDE_STATUS } = require('../constants/statuses');
+const { addBalance, deductBalance } = require('./walletHelper');
 
 const ACTIVE_RIDE_STATUSES = [
   RIDE_STATUS.ACTIVE,
@@ -24,6 +25,7 @@ async function cleanupExpiredRides() {
 
   const batch = db.batch();
   let writes = 0;
+  const walletSettlements = [];
 
   for (const doc of snap.docs) {
     const ride = doc.data() || {};
@@ -57,6 +59,12 @@ async function cleanupExpiredRides() {
           updatedAt: completedAt,
         });
         writes += 1;
+        walletSettlements.push({
+          dealId: deal.ref.id,
+          captainId: deal.data.captainId,
+          customerId: deal.data.customerId,
+          agreedFare: deal.data.agreedFare,
+        });
       } else if (deal.data.status === DEAL_STATUS.PENDING) {
         batch.update(deal.ref, {
           status: DEAL_STATUS.CANCELLED,
@@ -76,6 +84,32 @@ async function cleanupExpiredRides() {
   }
 
   if (writes > 0) await batch.commit();
+
+  for (const settlement of walletSettlements) {
+    const { dealId, captainId, customerId, agreedFare } = settlement;
+    const fare = parseFloat(agreedFare || 0);
+    if (!fare || fare <= 0 || !captainId || !customerId) continue;
+
+    try {
+      await addBalance(captainId, fare, {
+        type: 'ride_earning',
+        description: 'Auto-completed ride earning',
+        reference: dealId,
+      });
+    } catch (err) {
+      console.error(`Auto-complete captain payout failed for deal ${dealId}:`, err.message);
+    }
+
+    try {
+      await deductBalance(customerId, fare, {
+        type: 'ride_payment',
+        description: 'Auto-completed ride payment',
+        reference: dealId,
+      });
+    } catch (err) {
+      console.error(`Auto-complete customer payment failed for deal ${dealId}:`, err.message);
+    }
+  }
 }
 
 async function cleanupExpiredCustomerRequests() {

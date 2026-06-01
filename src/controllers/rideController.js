@@ -3,7 +3,12 @@ const { getBalance } = require('../utils/walletHelper');
 const { pushToUser } = require('../utils/notificationHelper');
 const { normalizeRouteLabels } = require('../utils/aiLocationHelper');
 const { labelFromLocation } = require('../utils/locationLabelHelper');
-const { cleanupExpiredRides } = require('../utils/lifecycleCleanup');
+const { maybeCleanupExpiredRides } = require('../utils/throttledCleanup');
+const {
+  sanitizeString,
+  exceedsMaxLength,
+  MAX_LOCATION,
+} = require('../utils/inputSanitizer');
 
 // Helper function to parse numbers
 function parseNumber(value) {
@@ -108,10 +113,27 @@ const postRide = async (req, res) => {
       }
     }
 
-    const rawStartLocation = labelFromLocation(startLocation);
-    const rawEndLocation = labelFromLocation(endLocation);
-    const rawExactLocation = labelFromLocation(exactLocation);
-    const rawExactDropLocation = labelFromLocation(exactDropLocation);
+    if (
+      exceedsMaxLength(startLocation, MAX_LOCATION) ||
+      exceedsMaxLength(endLocation, MAX_LOCATION) ||
+      exceedsMaxLength(exactLocation, MAX_LOCATION) ||
+      exceedsMaxLength(exactDropLocation, MAX_LOCATION)
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: `Location fields must be at most ${MAX_LOCATION} characters`,
+        code: 'FIELD_TOO_LONG',
+      });
+    }
+
+    const rawStartLocation = sanitizeString(labelFromLocation(startLocation), MAX_LOCATION);
+    const rawEndLocation = sanitizeString(labelFromLocation(endLocation), MAX_LOCATION);
+    const rawExactLocation = exactLocation
+      ? sanitizeString(labelFromLocation(exactLocation), MAX_LOCATION)
+      : '';
+    const rawExactDropLocation = exactDropLocation
+      ? sanitizeString(labelFromLocation(exactDropLocation), MAX_LOCATION)
+      : '';
 
     if (!rawStartLocation || !rawEndLocation || !departureTime || !totalSeats || !suggestedFare) {
       return res.status(400).json({ success: false, error: 'Missing required fields', code: 'MISSING_FIELDS' });
@@ -160,6 +182,9 @@ const postRide = async (req, res) => {
     const parsedFare = parseNumber(suggestedFare);
     if (!parsedFare || parsedFare <= 0) {
       return res.status(400).json({ success: false, error: 'suggestedFare must be greater than 0', code: 'INVALID_FARE' });
+    }
+    if (parsedFare < 50) {
+      return res.status(400).json({ success: false, error: 'Minimum fare is Rs 50', code: 'FARE_TOO_LOW' });
     }
 
     const normalizedLabels = await normalizeRouteLabels({
@@ -237,11 +262,14 @@ const postRide = async (req, res) => {
 
     // Send notifications
     try {
-      const usersSnap = await db.collection('users').where('role', 'in', ['customer', 'passenger']).get();
+      const usersSnap = await db
+        .collection('users')
+        .where('role', 'in', ['customer', 'passenger'])
+        .where('fcmToken', '!=', null)
+        .get();
       const captainCity = (userData.city || '').toString().trim().toLowerCase();
-      const targets = usersSnap.docs.filter(doc => {
+      const targets = usersSnap.docs.filter((doc) => {
         const u = doc.data() || {};
-        if (!u.fcmToken) return false;
         if (!captainCity) return true;
         return (u.city || '').toString().trim().toLowerCase() === captainCity;
       });
@@ -264,8 +292,10 @@ const postRide = async (req, res) => {
 
 const getActiveRides = async (req, res) => {
   const { rideType, startLocation, endLocation, rideMode } = req.query;
+  const pageLimit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 50);
+  const afterId = (req.query.after || '').toString().trim();
   try {
-    await cleanupExpiredRides();
+    await maybeCleanupExpiredRides();
     const userLat = parseNumber(req.query.lat);
     const userLng = parseNumber(req.query.lng);
     let requesterGender = '';
@@ -276,8 +306,19 @@ const getActiveRides = async (req, res) => {
 
     const now = new Date().toISOString();
     let query = db.collection('rides').where('status', '==', 'active').where('departureTime', '>=', now);
-    const snap = await query.orderBy('departureTime').get();
+    if (afterId) {
+      const afterDoc = await db.collection('rides').doc(afterId).get();
+      if (afterDoc.exists) {
+        query = query.orderBy('departureTime').startAfter(afterDoc);
+      } else {
+        query = query.orderBy('departureTime');
+      }
+    } else {
+      query = query.orderBy('departureTime');
+    }
+    const snap = await query.limit(pageLimit).get();
     let rides = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const lastDoc = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
 
     // Filter ladies rides
     if (requesterGender !== 'female') {
@@ -340,7 +381,14 @@ const getActiveRides = async (req, res) => {
       rides.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
     }
 
-    return res.json({ success: true, count: rides.length, rides });
+    res.set('Cache-Control', 'public, max-age=10');
+    return res.json({
+      success: true,
+      count: rides.length,
+      rides,
+      hasMore: snap.docs.length >= pageLimit,
+      lastDocId: lastDoc ? lastDoc.id : null,
+    });
   } catch (err) {
     console.error('Error fetching rides:', err);
     return res.status(500).json({ success: false, error: err.message, code: 'GET_RIDES_ERROR' });
@@ -371,7 +419,7 @@ const getMyRides = async (req, res) => {
   if (!uid) return res.status(400).json({ success: false, error: 'Captain ID is required', code: 'MISSING_CAPTAIN_ID' });
   
   try {
-    await cleanupExpiredRides();
+    await maybeCleanupExpiredRides();
     const snap = await db.collection('rides').where('captainId', '==', uid).orderBy('createdAt', 'desc').get();
     const rides = snap.docs.map(d => ({ id: d.id, ...d.data() }));
     return res.json({ success: true, rides });
@@ -383,9 +431,10 @@ const getMyRides = async (req, res) => {
 const getRideById = async (req, res) => {
   const { rideId } = req.params;
   try {
-    await cleanupExpiredRides();
+    await maybeCleanupExpiredRides();
     const rideDoc = await db.collection('rides').doc(rideId).get();
     if (!rideDoc.exists) return res.status(404).json({ success: false, error: 'Ride not found', code: 'RIDE_NOT_FOUND' });
+    res.set('Cache-Control', 'public, max-age=10');
     return res.json({ success: true, ride: { id: rideDoc.id, ...rideDoc.data() } });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message, code: 'GET_RIDE_BY_ID_ERROR' });

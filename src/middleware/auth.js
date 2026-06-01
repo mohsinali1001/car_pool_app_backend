@@ -21,13 +21,18 @@ const verifyToken = async (req, res, next) => {
 };
 
 const requireCaptain = async (req, res, next) => {
-  const { db } = require('../config/firebase');
-  const userDoc = await db.collection('users').doc(req.user.uid).get();
-  if (!userDoc.exists || userDoc.data().role !== 'captain') {
-    return res.status(403).json({ error: 'Captains only' });
+  try {
+    const { db } = require('../config/firebase');
+    const userDoc = await db.collection('users').doc(req.user.uid).get();
+    if (!userDoc.exists || userDoc.data().role !== 'captain') {
+      return res.status(403).json({ error: 'Captains only' });
+    }
+    req.userDoc = userDoc.data();
+    next();
+  } catch (err) {
+    console.error('requireCaptain error:', err.message);
+    return res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
   }
-  req.userDoc = userDoc.data();
-  next();
 };
 
 module.exports = { verifyToken, requireCaptain };

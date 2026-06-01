@@ -26,12 +26,20 @@ const getTransactions = async (req, res) => {
 };
 
 const topUpWallet = async (req, res) => {
+  // TODO: Replace with a real payment gateway verification before production.
+  const topupSecret = process.env.TOPUP_SECRET;
+  const providedSecret = req.headers['x-topup-secret'];
+  if (!topupSecret || providedSecret !== topupSecret) {
+    return res.status(403).json({ success: false, error: 'Forbidden', code: 'TOPUP_FORBIDDEN' });
+  }
+
   const { amount, reference } = req.body;
-  if (!amount || amount <= 0 || amount > 50000) {
+  const parsedAmount = parseFloat(amount);
+  if (!Number.isFinite(parsedAmount) || parsedAmount <= 0 || parsedAmount > 50000) {
     return res.status(400).json({ success: false, error: 'Invalid amount', code: 'INVALID_AMOUNT' });
   }
   try {
-    const newBalance = await addBalance(req.user.uid, amount, {
+    const newBalance = await addBalance(req.user.uid, parsedAmount, {
       type: 'topup',
       description: 'Manual top-up',
       reference: reference || `manual_${Date.now()}`,

@@ -299,9 +299,20 @@ const updateProfile = async (req, res) => {
 const updateFcmToken = async (req, res) => {
   const { fcmToken } = req.body;
   const uid = req.user.uid;
+
+  if (fcmToken != null) {
+    if (typeof fcmToken !== 'string' || fcmToken.trim().length === 0 || fcmToken.length > 300) {
+      return res.status(400).json({
+        success: false,
+        error: 'fcmToken must be a non-empty string under 300 characters',
+        code: 'INVALID_FCM_TOKEN',
+      });
+    }
+  }
+
   try {
     await db.collection('users').doc(uid).set(
-      { fcmToken, updatedAt: new Date().toISOString() },
+      { fcmToken: fcmToken != null ? fcmToken.trim() : null, updatedAt: new Date().toISOString() },
       { merge: true }
     );
     
@@ -315,4 +326,33 @@ const updateFcmToken = async (req, res) => {
   }
 };
 
-module.exports = { syncUser, getProfile, updateProfile, updateFcmToken };
+const updateOnlineStatus = async (req, res) => {
+  const uid = req.user.uid;
+  const isOnline = req.body.isOnline === true;
+
+  try {
+    await db.collection('users').doc(uid).set(
+      {
+        isOnline,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true },
+    );
+    userCache.delete(uid);
+    return res.json({ success: true, isOnline });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      error: err.message,
+      code: 'ONLINE_STATUS_ERROR',
+    });
+  }
+};
+
+module.exports = {
+  syncUser,
+  getProfile,
+  updateProfile,
+  updateFcmToken,
+  updateOnlineStatus,
+};

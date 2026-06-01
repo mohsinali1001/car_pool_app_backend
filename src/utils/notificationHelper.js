@@ -59,16 +59,23 @@ async function pushToUser(userId, { title, body, type, data }) {
     const msgType = type || 'general';
     const fcmData = stringifyData({ type: msgType, ...(data || {}) });
 
+    const isHighPriority = HIGH_PRIORITY_TYPES.has(msgType);
     const message = {
       token,
       notification: { title, body },
       data: fcmData,
+      android: {
+        priority: isHighPriority ? 'high' : 'normal',
+        notification: {
+          sound: 'default',
+          channelId: 'carpool_requests',
+        },
+      },
+      apns: {
+        headers: { 'apns-priority': isHighPriority ? '10' : '5' },
+        payload: { aps: { sound: 'default' } },
+      },
     };
-
-    if (HIGH_PRIORITY_TYPES.has(msgType)) {
-      message.android = { priority: 'high' };
-      message.apns = { headers: { 'apns-priority': '10' } };
-    }
 
     await messaging.send(message);
   } catch (e) {

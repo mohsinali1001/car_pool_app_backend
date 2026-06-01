@@ -1,9 +1,16 @@
 const { db } = require('../config/firebase');
-const { deductBalance, addBalance, ensureWallet } = require('../utils/walletHelper');
+const { deductBalance, addBalance } = require('../utils/walletHelper');
 const { pushToUser } = require('../utils/notificationHelper');
 const { RIDE_STATUS, DEAL_STATUS, ACTIVE_DEAL_STATUSES } = require('../constants/statuses');
 const { labelFromLocation } = require('../utils/locationLabelHelper');
-const { cleanupExpiredRides } = require('../utils/lifecycleCleanup');
+const { maybeCleanupExpiredRides } = require('../utils/throttledCleanup');
+const {
+  sanitizeString,
+  exceedsMaxLength,
+  MAX_CUSTOMER_MESSAGE,
+  MAX_REVIEW,
+} = require('../utils/inputSanitizer');
+const { CAPTAIN_STARTER_BALANCE } = require('../utils/walletHelper');
 
 const PLATFORM_FEE_PERCENT = 0.05;
 
@@ -132,6 +139,15 @@ const createDeal = async (req, res) => {
     return res.status(400).json({ success: false, error: 'rideId and agreedFare required', code: 'MISSING_FIELDS' });
   }
 
+  if (exceedsMaxLength(customerMessage, MAX_CUSTOMER_MESSAGE)) {
+    return res.status(400).json({
+      success: false,
+      error: `customerMessage must be at most ${MAX_CUSTOMER_MESSAGE} characters`,
+      code: 'FIELD_TOO_LONG',
+    });
+  }
+  const sanitizedMessage = sanitizeString(customerMessage, MAX_CUSTOMER_MESSAGE);
+
   const pickupLat = parseCoord(passengerPickupLat);
   const pickupLng = parseCoord(passengerPickupLng);
   const pickupAddress = labelFromLocation(passengerPickupAddress);
@@ -206,7 +222,7 @@ const createDeal = async (req, res) => {
         agreedFare: parseFloat(agreedFare),
         platformFee,
         status: DEAL_STATUS.PENDING,
-        customerMessage: customerMessage || '',
+        customerMessage: sanitizedMessage,
         passengerPickupLat: pickupLat,
         passengerPickupLng: pickupLng,
         passengerPickupAddress: pickupAddress,
@@ -248,60 +264,99 @@ const confirmDeal = async (req, res) => {
     if (!dealSnap.exists) {
       return res.status(404).json({ success: false, error: 'Deal not found', code: 'DEAL_NOT_FOUND' });
     }
-    const deal = dealSnap.data();
-    if (deal.captainId !== uid) {
+    const preDeal = dealSnap.data();
+    if (preDeal.captainId !== uid) {
       return res.status(403).json({ success: false, error: 'Not your deal', code: 'UNAUTHORIZED' });
     }
-    if (deal.status !== DEAL_STATUS.PENDING) {
+    if (preDeal.status !== DEAL_STATUS.PENDING) {
       return res.status(400).json({ success: false, error: 'Deal already processed', code: 'INVALID_STATE' });
     }
 
-    const commission = parseFloat(deal.agreedFare || 0) * PLATFORM_FEE_PERCENT;
+    const rideRef = db.collection('rides').doc(preDeal.rideId);
     const walletRef = db.collection('wallets').doc(uid);
-    const wallet = await ensureWallet(uid);
-    const currentBalance = Number(wallet.balance || 0);
-
-    if (currentBalance < commission) {
-      return res.status(400).json({
-        success: false,
-        code: 'INSUFFICIENT_BALANCE',
-        error: 'Insufficient wallet balance to confirm deal',
-        required: commission,
-        current: currentBalance,
-      });
-    }
-
-    const newBalance = currentBalance - commission;
+    const commission = parseFloat(preDeal.agreedFare || 0) * PLATFORM_FEE_PERCENT;
     const now = new Date().toISOString();
+    let newBalance = 0;
+    let customerId = preDeal.customerId;
 
-    await walletRef.set(
-      {
-        id: uid,
-        userId: uid,
-        balance: newBalance,
+    await db.runTransaction(async (t) => {
+      const dealDoc = await t.get(dealRef);
+      if (!dealDoc.exists) throw Object.assign(new Error('Deal not found'), { code: 'DEAL_NOT_FOUND' });
+      const deal = dealDoc.data();
+      if (deal.captainId !== uid) throw Object.assign(new Error('Not your deal'), { code: 'UNAUTHORIZED' });
+      if (deal.status !== DEAL_STATUS.PENDING) {
+        throw Object.assign(new Error('Deal already processed'), { code: 'INVALID_STATE' });
+      }
+
+      const rideDoc = await t.get(rideRef);
+      if (!rideDoc.exists) throw new Error('Ride not found');
+      const ride = rideDoc.data();
+      const available = ride.availableSeats ?? ride.totalSeats ?? 0;
+      if (available <= 0) {
+        throw Object.assign(new Error('Ride is full'), { code: 'RIDE_FULL', statusCode: 400 });
+      }
+
+      const walletDoc = await t.get(walletRef);
+      let currentBalance = walletDoc.exists
+        ? Number(walletDoc.data().balance || 0)
+        : CAPTAIN_STARTER_BALANCE;
+
+      if (currentBalance < commission) {
+        throw Object.assign(new Error('Insufficient wallet balance to confirm deal'), {
+          code: 'INSUFFICIENT_BALANCE',
+          statusCode: 400,
+          required: commission,
+          current: currentBalance,
+        });
+      }
+
+      newBalance = currentBalance - commission;
+      customerId = deal.customerId;
+
+      const { available: newSeats } = seatUpdateFromRide(ride, -1);
+      const rideUpdates = {
+        availableSeats: newSeats,
+        full: newSeats <= 0,
         updatedAt: now,
-      },
-      { merge: true },
-    );
+      };
+      if (newSeats <= 0) {
+        rideUpdates.status = RIDE_STATUS.FILLED;
+      }
+      t.update(rideRef, rideUpdates);
 
-    await db.collection('transactions').add({
-      walletId: uid,
-      type: 'commission',
-      amount: commission,
-      reference: dealId,
-      description: `5% commission for deal ${dealId}`,
-      balanceAfter: newBalance,
-      createdAt: now,
+      t.set(
+        walletRef,
+        {
+          id: uid,
+          userId: uid,
+          balance: newBalance,
+          updatedAt: now,
+        },
+        { merge: true },
+      );
+
+      const txRef = db.collection('transactions').doc();
+      t.set(txRef, {
+        walletId: uid,
+        type: 'commission',
+        amount: commission,
+        reference: dealId,
+        description: `5% commission for deal ${dealId}`,
+        balanceAfter: newBalance,
+        createdAt: now,
+      });
+
+      t.update(dealRef, {
+        status: DEAL_STATUS.CONFIRMED,
+        phoneRevealed: true,
+        confirmedAt: now,
+        updatedAt: now,
+      });
     });
 
-    await dealRef.update({
-      status: DEAL_STATUS.CONFIRMED,
-      phoneRevealed: true,
-      confirmedAt: now,
-      updatedAt: now,
-    });
+    await syncRideStatusFromDeals(preDeal.rideId);
 
-    await pushToUser(deal.customerId, {
+    await pushToUser(customerId, {
       title: 'Booking confirmed',
       body: 'Your ride booking has been confirmed.',
       type: 'deal_confirmed',
@@ -315,7 +370,14 @@ const confirmDeal = async (req, res) => {
       newBalance,
     });
   } catch (err) {
-    return res.status(400).json({ success: false, error: err.message, code: 'CONFIRM_DEAL_ERROR' });
+    const status = err.statusCode || (err.code === 'RIDE_FULL' || err.code === 'INSUFFICIENT_BALANCE' ? 400 : 400);
+    return res.status(status).json({
+      success: false,
+      error: err.message,
+      code: err.code || 'CONFIRM_DEAL_ERROR',
+      required: err.required,
+      current: err.current,
+    });
   }
 };
 
@@ -414,8 +476,15 @@ const counterDeal = async (req, res) => {
       lastCounterAt: now,
       updatedAt: now,
     };
-    if (message != null && String(message).trim().isNotEmpty) {
-      updateData.customerMessage = String(message).trim();
+    if (message != null && String(message).trim().length > 0) {
+      if (exceedsMaxLength(message, MAX_CUSTOMER_MESSAGE)) {
+        return res.status(400).json({
+          success: false,
+          error: `message must be at most ${MAX_CUSTOMER_MESSAGE} characters`,
+          code: 'FIELD_TOO_LONG',
+        });
+      }
+      updateData.customerMessage = sanitizeString(message, MAX_CUSTOMER_MESSAGE);
     }
 
     await dealRef.update(updateData);
@@ -551,7 +620,7 @@ const completeDeal = async (req, res) => {
 
 const getDeal = async (req, res) => {
   try {
-    await cleanupExpiredRides();
+    await maybeCleanupExpiredRides();
     const doc = await db.collection('deals').doc(req.params.dealId).get();
     if (!doc.exists) {
       return res.status(404).json({ success: false, error: 'Deal not found', code: 'DEAL_NOT_FOUND' });
@@ -597,6 +666,15 @@ const rateDeal = async (req, res) => {
     return res.status(400).json({ success: false, error: 'Rating must be 1–5', code: 'INVALID_RATING' });
   }
 
+  if (exceedsMaxLength(review, MAX_REVIEW)) {
+    return res.status(400).json({
+      success: false,
+      error: `review must be at most ${MAX_REVIEW} characters`,
+      code: 'FIELD_TOO_LONG',
+    });
+  }
+  const sanitizedReview = sanitizeString(review, MAX_REVIEW);
+
   try {
     const dealRef = db.collection('deals').doc(dealId);
     const dealSnap = await dealRef.get();
@@ -627,7 +705,7 @@ const rateDeal = async (req, res) => {
       });
       t.update(dealRef, {
         rating: parseFloat(rating),
-        review: review || '',
+        review: sanitizedReview,
         updatedAt: new Date().toISOString(),
       });
     });
@@ -640,7 +718,7 @@ const rateDeal = async (req, res) => {
 
 const getMyBookings = async (req, res) => {
   try {
-    await cleanupExpiredRides();
+    await maybeCleanupExpiredRides();
     const snap = await db
       .collection('deals')
       .where('customerId', '==', req.user.uid)
@@ -789,7 +867,7 @@ const updateBoardingStatus = async (req, res) => {
 const getRideDeals = async (req, res) => {
   const { rideId } = req.params;
   try {
-    await cleanupExpiredRides();
+    await maybeCleanupExpiredRides();
     const rideDoc = await db.collection('rides').doc(rideId).get();
     if (!rideDoc.exists) {
       return res.status(404).json({ success: false, error: 'Ride not found', code: 'RIDE_NOT_FOUND' });

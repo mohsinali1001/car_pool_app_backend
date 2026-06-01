@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const helmet = require('helmet');
 const morgan = require('morgan');
 
@@ -80,7 +81,13 @@ app.set('trust proxy', 1);
 // Security Middlewares
 app.use(helmet());
 app.use(globalLimiter); // Global Security
-app.use(cors());
+app.use(cors({
+  origin: ['https://huzaifa1435-carpool.hf.space', 'http://localhost:3000'],
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+}));
+app.use(compression());
 app.use(morgan('dev'));
 app.use(express.json({ limit: '10kb' })); // Anti-DOS payload limit
 
