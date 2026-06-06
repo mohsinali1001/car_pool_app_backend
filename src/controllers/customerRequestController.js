@@ -338,6 +338,236 @@ const getMyCustomerRequests = async (req, res) => {
   }
 };
 
+const deleteCustomerRequest = async (req, res) => {
+  const uid = req.user.uid;
+  const { requestId } = req.params;
+
+  try {
+    const requestRef = db.collection('customerRideRequests').doc(requestId);
+    const requestDoc = await requestRef.get();
+    if (!requestDoc.exists) {
+      return res.status(404).json({ success: false, error: 'Request not found', code: 'REQUEST_NOT_FOUND' });
+    }
+
+    const request = requestDoc.data() || {};
+    if (request.customerId !== uid) {
+      return res.status(403).json({ success: false, error: 'Unauthorized', code: 'UNAUTHORIZED' });
+    }
+
+    const status = (request.status || '').toString().toLowerCase();
+    if (['accepted', 'completed'].includes(status)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Accepted or completed requests cannot be deleted',
+        code: 'REQUEST_LOCKED',
+      });
+    }
+
+    const offersSnap = await db
+      .collection('customerRideOffers')
+      .where('requestId', '==', requestId)
+      .get();
+    const batch = db.batch();
+    offersSnap.docs.forEach((offerDoc) => batch.delete(offerDoc.ref));
+    batch.delete(requestRef);
+    await batch.commit();
+
+    return res.json({ success: true, message: 'Request deleted' });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message, code: 'DELETE_CUSTOMER_REQUEST_ERROR' });
+  }
+};
+
+const acceptCustomerFare = async (req, res) => {
+  const uid = req.user.uid;
+  const { requestId } = req.params;
+
+  try {
+    const requestRef = db.collection('customerRideRequests').doc(requestId);
+    const requestDoc = await requestRef.get();
+    if (!requestDoc.exists) {
+      return res.status(404).json({ success: false, error: 'Request not found', code: 'REQUEST_NOT_FOUND' });
+    }
+
+    const request = requestDoc.data() || {};
+    if (!['open', 'countered'].includes((request.status || '').toString().toLowerCase())) {
+      return res.status(400).json({ success: false, error: 'Request is not open', code: 'INVALID_STATE' });
+    }
+
+    const agreedFare = parseNumber(request.desiredFare);
+    if (!agreedFare || agreedFare < MIN_FARE) {
+      return res.status(400).json({
+        success: false,
+        error: 'Customer fare is missing or below minimum fare',
+        code: 'INVALID_CUSTOMER_FARE',
+      });
+    }
+
+    const captainDoc = await db.collection('users').doc(uid).get();
+    if (!captainDoc.exists) {
+      return res.status(404).json({ success: false, error: 'Captain not found', code: 'USER_NOT_FOUND' });
+    }
+    const captain = captainDoc.data() || {};
+    const captainPhone = captain.phone || '';
+    const vehicleParts = [
+      captain.captainVehicleType,
+      captain.vehicleMake,
+      captain.vehicleModel,
+      captain.vehicleColor,
+    ]
+      .filter(Boolean)
+      .map((v) => String(v).trim())
+      .filter(Boolean);
+
+    const existingOffersSnap = await db
+      .collection('customerRideOffers')
+      .where('requestId', '==', requestId)
+      .get();
+    const myExistingOffer = existingOffersSnap.docs.find((doc) => {
+      const offer = doc.data() || {};
+      return offer.captainId === uid && !['cancelled'].includes((offer.status || '').toString().toLowerCase());
+    });
+
+    const now = new Date().toISOString();
+    const offerRef = myExistingOffer
+      ? myExistingOffer.ref
+      : db.collection('customerRideOffers').doc();
+    const offerId = offerRef.id;
+    const offer = {
+      id: offerId,
+      requestId,
+      captainId: uid,
+      captainName: captain.name || 'Captain',
+      captainPhone,
+      captainVehicleType: captain.captainVehicleType || '',
+      captainVehicleInfo: vehicleParts.join(' '),
+      captainVehicleRegistration: captain.vehicleRegistration || '',
+      availableSeats: parseInt(captain.vehicleSeats || 1, 10) || 1,
+      customerId: request.customerId,
+      fare: agreedFare,
+      counterFare: null,
+      message: 'Accepted customer fare',
+      status: 'accepted',
+      phoneRevealed: true,
+      createdAt: myExistingOffer?.data()?.createdAt || now,
+      updatedAt: now,
+    };
+
+    const platformFee = agreedFare * PLATFORM_FEE_PERCENT;
+    const rideRef = db.collection('rides').doc();
+    const dealRef = db.collection('deals').doc();
+    const vehicleInfo =
+      offer.captainVehicleInfo ||
+      [
+        captain.captainVehicleType,
+        captain.vehicleMake,
+        captain.vehicleModel,
+        captain.vehicleColor,
+      ]
+        .filter(Boolean)
+        .join(' ');
+
+    const batch = db.batch();
+    batch.set(offerRef, offer, { merge: true });
+    for (const offerDoc of existingOffersSnap.docs) {
+      if (offerDoc.id === offerId) continue;
+      batch.update(offerDoc.ref, {
+        status: 'cancelled',
+        updatedAt: now,
+      });
+    }
+    batch.update(requestRef, {
+      status: 'accepted',
+      finalFare: agreedFare,
+      acceptedOfferId: offerId,
+      acceptedCaptainId: uid,
+      acceptedCaptainName: offer.captainName,
+      acceptedCaptainPhone: captainPhone,
+      acceptedRideId: rideRef.id,
+      acceptedDealId: dealRef.id,
+      captainPhoneRevealed: true,
+      customerPhoneRevealed: true,
+      updatedAt: now,
+    });
+    batch.set(rideRef, {
+      id: rideRef.id,
+      captainId: uid,
+      captainName: offer.captainName,
+      captainPhone,
+      startLocation: request.startLocation,
+      endLocation: request.endLocation,
+      pickupLocation: request.pickupLocation || request.startLocation,
+      dropLocation: request.dropLocation || request.endLocation,
+      startLat: request.startLat,
+      startLng: request.startLng,
+      endLat: request.endLat,
+      endLng: request.endLng,
+      departureTime: request.requestedAt,
+      totalSeats: 1,
+      availableSeats: 0,
+      full: true,
+      suggestedFare: agreedFare,
+      status: RIDE_STATUS.ACTIVE,
+      vehicleType: offer.captainVehicleType || request.vehicleType || 'car',
+      vehicleInfo,
+      rideType: 'random',
+      rideMode: request.rideMode || 'solo',
+      customerRequestId: requestId,
+      createdAt: now,
+      updatedAt: now,
+    });
+    batch.set(dealRef, {
+      id: dealRef.id,
+      rideId: rideRef.id,
+      captainId: uid,
+      customerId: request.customerId,
+      customerName: request.customerName || 'Customer',
+      customerPhone: request.customerPhone || '',
+      captainPhone,
+      agreedFare,
+      platformFee,
+      status: DEAL_STATUS.CONFIRMED,
+      phoneRevealed: true,
+      passengerPickupLat: request.startLat,
+      passengerPickupLng: request.startLng,
+      passengerPickupAddress: request.pickupLocation || request.startLocation,
+      passengerDropLat: request.endLat,
+      passengerDropLng: request.endLng,
+      passengerDropAddress: request.dropLocation || request.endLocation,
+      boardingStatus: 'waiting',
+      confirmedAt: now,
+      createdAt: now,
+      updatedAt: now,
+      customerRequestId: requestId,
+      customerOfferId: offerId,
+    });
+
+    await batch.commit();
+    await pushToUser(request.customerId, {
+      title: 'Ride Confirmed',
+      body: `${offer.captainName} accepted your fare of Rs ${agreedFare.toFixed(0)}. Contact number is now available.`,
+      type: 'customer_request_accepted',
+      data: {
+        requestId,
+        offerId,
+        rideId: rideRef.id,
+        dealId: dealRef.id,
+        screen: 'customer-request',
+      },
+    });
+
+    return res.json({
+      success: true,
+      message: 'Customer fare accepted',
+      offer,
+      rideId: rideRef.id,
+      dealId: dealRef.id,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message, code: 'ACCEPT_CUSTOMER_FARE_ERROR' });
+  }
+};
+
 const createOffer = async (req, res) => {
   const uid = req.user.uid;
   const { requestId } = req.params;
@@ -652,6 +882,8 @@ module.exports = {
   createCustomerRequest,
   getOpenCustomerRequests,
   getMyCustomerRequests,
+  deleteCustomerRequest,
+  acceptCustomerFare,
   createOffer,
   respondOffer,
   updateOffer,

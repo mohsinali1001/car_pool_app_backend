@@ -265,7 +265,6 @@ const postRide = async (req, res) => {
       const usersSnap = await db
         .collection('users')
         .where('role', 'in', ['customer', 'passenger'])
-        .where('fcmToken', '!=', null)
         .get();
       const captainCity = (userData.city || '').toString().trim().toLowerCase();
       const targets = usersSnap.docs.filter((doc) => {
