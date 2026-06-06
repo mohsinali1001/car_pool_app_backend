@@ -56,9 +56,12 @@ async function attachOffers(request) {
   const snap = await db
     .collection('customerRideOffers')
     .where('requestId', '==', request.id)
-    .orderBy('createdAt', 'desc')
     .get();
-  request.offers = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  request.offers = snap.docs
+    .map((d) => ({ id: d.id, ...d.data() }))
+    .sort((a, b) =>
+      String(b.createdAt || '').localeCompare(String(a.createdAt || '')),
+    );
   return request;
 }
 
@@ -226,7 +229,6 @@ const createCustomerRequest = async (req, res) => {
       const captainsSnap = await db
         .collection('users')
         .where('role', '==', 'captain')
-        .where('fcmToken', '!=', null)
         .get();
       const requestCity = (request.city || '').toString().trim().toLowerCase();
       const targets = captainsSnap.docs.filter((doc) => {
@@ -269,7 +271,6 @@ const getOpenCustomerRequests = async (req, res) => {
     const snap = await db
       .collection('customerRideRequests')
       .where('status', 'in', ['open', 'countered', 'accepted', 'completed'])
-      .orderBy('createdAt', 'desc')
       .limit(100)
       .get();
 
@@ -323,11 +324,13 @@ const getMyCustomerRequests = async (req, res) => {
     const snap = await db
       .collection('customerRideRequests')
       .where('customerId', '==', req.user.uid)
-      .orderBy('createdAt', 'desc')
       .limit(100)
       .get();
     let requests = await Promise.all(
       snap.docs.map((doc) => attachOffers({ id: doc.id, ...doc.data() })),
+    );
+    requests.sort((a, b) =>
+      String(b.createdAt || '').localeCompare(String(a.createdAt || '')),
     );
     return res.json({ success: true, requests });
   } catch (err) {

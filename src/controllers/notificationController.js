@@ -19,10 +19,13 @@ const getMyNotifications = async (req, res) => {
     const snap = await db
       .collection('notifications')
       .where('userId', '==', req.user.uid)
-      .orderBy('createdAt', 'desc')
       .limit(50)
       .get();
-    const notifications = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    const notifications = snap.docs
+      .map((d) => ({ id: d.id, ...d.data() }))
+      .sort((a, b) =>
+        String(b.createdAt || '').localeCompare(String(a.createdAt || '')),
+      );
     return res.json({ success: true, notifications });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message, code: 'GET_NOTIFICATIONS_ERROR' });
