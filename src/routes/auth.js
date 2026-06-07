@@ -72,31 +72,34 @@ router.patch('/profile/captain', verifyToken, async (req, res) => {
       existingStatus === 'pending_verification' || existingStatus === 'verified';
 
     const updateData = {
-      phone: phone || '',
       captainVerificationStatus: lockedStatus
         ? existingStatus
         : captainVerificationStatus || existingStatus || 'pending_verification',
-      cnicFrontUrl: cnicFrontUrl || null,
-      cnicBackUrl: cnicBackUrl || null,
-      cnic: cnic || null,
-      city: city || null,
-      vehicleMake: vehicleMake || null,
-      vehicleModel: vehicleModel || null,
-      captainVehicleType: normalizedCaptainVehicleType || null,
-      vehicleColor: vehicleColor || null,
-      vehicleRegistration: vehicleRegistration || null,
-      vehicleYear: vehicleYear || null,
-      vehicleSeats: vehicleSeats || null,
-      emergencyContactName: emergencyContactName || null,
-      emergencyContactPhone: emergencyContactPhone || null,
       isVerified: false,
       updatedAt: new Date().toISOString(),
     };
 
-    // Remove undefined fields
-    Object.keys(updateData).forEach(key => {
-      if (updateData[key] === undefined) delete updateData[key];
-    });
+    const setIfPresent = (key, value, normalize = (v) => v) => {
+      if (value !== undefined) {
+        const normalized = normalize(value);
+        updateData[key] = normalized === '' ? null : normalized;
+      }
+    };
+
+    setIfPresent('phone', phone, (v) => String(v).trim());
+    setIfPresent('cnicFrontUrl', cnicFrontUrl, (v) => String(v).trim());
+    setIfPresent('cnicBackUrl', cnicBackUrl, (v) => String(v).trim());
+    setIfPresent('cnic', cnic, (v) => String(v).trim());
+    setIfPresent('city', city, (v) => String(v).trim());
+    setIfPresent('vehicleMake', vehicleMake, (v) => String(v).trim());
+    setIfPresent('vehicleModel', vehicleModel, (v) => String(v).trim());
+    setIfPresent('captainVehicleType', normalizedCaptainVehicleType);
+    setIfPresent('vehicleColor', vehicleColor, (v) => String(v).trim());
+    setIfPresent('vehicleRegistration', vehicleRegistration, (v) => String(v).trim());
+    setIfPresent('vehicleYear', vehicleYear);
+    setIfPresent('vehicleSeats', vehicleSeats);
+    setIfPresent('emergencyContactName', emergencyContactName, (v) => String(v).trim());
+    setIfPresent('emergencyContactPhone', emergencyContactPhone, (v) => String(v).trim());
 
     if (gender !== undefined) {
       updateData.gender = genderValue;
