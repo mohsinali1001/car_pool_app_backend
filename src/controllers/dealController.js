@@ -4,6 +4,7 @@ const { pushToUser } = require('../utils/notificationHelper');
 const { RIDE_STATUS, DEAL_STATUS, ACTIVE_DEAL_STATUSES } = require('../constants/statuses');
 const { labelFromLocation } = require('../utils/locationLabelHelper');
 const { maybeCleanupExpiredRides } = require('../utils/throttledCleanup');
+const { seatUpdateFromRide } = require('../utils/seatHelper');
 const {
   sanitizeString,
   exceedsMaxLength,
@@ -28,16 +29,6 @@ function parseCoord(value) {
 
 function maskCaptainPhone(phone) {
   return '03**-*****';
-}
-
-/** Apply seat delta inside a transaction; returns new available seat count. */
-function seatUpdateFromRide(ride, delta) {
-  const totalSeats = ride.totalSeats ?? ride.availableSeats ?? 0;
-  let available = ride.availableSeats ?? totalSeats;
-  available += delta;
-  if (available < 0) throw new Error('Ride is full');
-  if (available > totalSeats) available = totalSeats;
-  return { available, totalSeats };
 }
 
 /** Recompute ride listing status from active deals on that ride. */
@@ -112,6 +103,7 @@ async function populateRide(deal) {
     captainName: ride.captainName,
     captainId: ride.captainId,
     vehicleInfo: ride.vehicleInfo,
+    vehiclePhotoUrl: ride.vehiclePhotoUrl,
     suggestedFare: ride.suggestedFare,
     status: ride.status,
     availableSeats: ride.availableSeats,
@@ -651,6 +643,17 @@ const getDeal = async (req, res) => {
       }
     }
 
+    if (deal.customerId) {
+      const customer = await db.collection('users').doc(deal.customerId).get();
+      if (customer.exists) {
+        deal.customer = {
+          name: customer.data().name,
+          phone: deal.customerPhone || customer.data().phone || '',
+          rating: customer.data().rating || 0,
+        };
+      }
+    }
+
     return res.json({ success: true, deal });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message, code: 'GET_DEAL_ERROR' });
@@ -682,31 +685,41 @@ const rateDeal = async (req, res) => {
       return res.status(404).json({ success: false, error: 'Deal not found', code: 'DEAL_NOT_FOUND' });
     }
     const deal = dealSnap.data();
-    if (deal.customerId !== uid) {
-      return res.status(403).json({ success: false, error: 'Only customer can rate', code: 'UNAUTHORIZED' });
-    }
     if (deal.status !== DEAL_STATUS.COMPLETED) {
       return res.status(400).json({ success: false, error: 'Cannot rate this deal', code: 'INVALID_STATE' });
     }
-    if (deal.rating != null) {
+    const isCustomerRatingCaptain = deal.customerId === uid;
+    const isCaptainRatingCustomer = deal.captainId === uid;
+    if (!isCustomerRatingCaptain && !isCaptainRatingCustomer) {
+      return res.status(403).json({ success: false, error: 'Unauthorized', code: 'UNAUTHORIZED' });
+    }
+
+    const targetUserId = isCustomerRatingCaptain ? deal.captainId : deal.customerId;
+    const ratingField = isCustomerRatingCaptain ? 'rating' : 'customerRating';
+    const reviewField = isCustomerRatingCaptain ? 'review' : 'customerReview';
+    const ratedAtField = isCustomerRatingCaptain ? 'ratedAt' : 'customerRatedAt';
+
+    if (deal[ratingField] != null) {
       return res.status(400).json({ success: false, error: 'Already rated', code: 'ALREADY_RATED' });
     }
 
-    const captainRef = db.collection('users').doc(deal.captainId);
+    const targetRef = db.collection('users').doc(targetUserId);
     await db.runTransaction(async (t) => {
-      const captainDoc = await t.get(captainRef);
-      const currentRating = captainDoc.data()?.rating || 0;
-      const totalRides = captainDoc.data()?.totalRides || 0;
+      const targetDoc = await t.get(targetRef);
+      const currentRating = targetDoc.data()?.rating || 0;
+      const totalRides = targetDoc.data()?.totalRides || 0;
       const newAvg = (currentRating * totalRides + rating) / (totalRides + 1);
-      t.update(captainRef, {
+      const now = new Date().toISOString();
+      t.update(targetRef, {
         rating: parseFloat(newAvg.toFixed(2)),
         totalRides: totalRides + 1,
-        updatedAt: new Date().toISOString(),
+        updatedAt: now,
       });
       t.update(dealRef, {
-        rating: parseFloat(rating),
-        review: sanitizedReview,
-        updatedAt: new Date().toISOString(),
+        [ratingField]: parseFloat(rating),
+        [reviewField]: sanitizedReview,
+        [ratedAtField]: now,
+        updatedAt: now,
       });
     });
 

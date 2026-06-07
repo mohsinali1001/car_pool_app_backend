@@ -9,10 +9,16 @@ const ACTIVE_RIDE_STATUSES = [
 ];
 
 const ACTIVE_CUSTOMER_REQUEST_STATUSES = ['open', 'countered', 'accepted'];
+const ACCEPTED_REQUEST_RETENTION_MS = 10 * 60 * 1000;
 
 function isPastIso(value, now = new Date()) {
   const dt = new Date(value || '');
   return !Number.isNaN(dt.getTime()) && dt < now;
+}
+
+function isOlderThanIso(value, ms, now = new Date()) {
+  const dt = new Date(value || '');
+  return !Number.isNaN(dt.getTime()) && now.getTime() - dt.getTime() >= ms;
 }
 
 async function cleanupExpiredRides() {
@@ -125,20 +131,39 @@ async function cleanupExpiredCustomerRequests() {
 
   for (const doc of snap.docs) {
     const request = doc.data() || {};
-    if (!isPastIso(request.requestedAt, now)) continue;
-
-    const completedAt = now.toISOString();
+    const status = (request.status || '').toString().toLowerCase();
     const offersSnap = await db
       .collection('customerRideOffers')
       .where('requestId', '==', doc.id)
       .get();
+
+    if (
+      ['accepted', 'completed'].includes(status) &&
+      isOlderThanIso(
+        request.acceptedAt || request.completedAt || request.updatedAt,
+        ACCEPTED_REQUEST_RETENTION_MS,
+        now,
+      )
+    ) {
+      for (const offerDoc of offersSnap.docs) {
+        batch.delete(offerDoc.ref);
+        writes += 1;
+      }
+      batch.delete(doc.ref);
+      writes += 1;
+      continue;
+    }
+
+    if (!isPastIso(request.requestedAt, now)) continue;
+
+    const completedAt = now.toISOString();
 
     const acceptedOffer = offersSnap.docs.find((offerDoc) => {
       const offer = offerDoc.data() || {};
       return offer.status === 'accepted' || offerDoc.id === request.acceptedOfferId;
     });
 
-    if (request.status === 'accepted' && acceptedOffer) {
+    if (status === 'accepted' && acceptedOffer) {
       batch.update(doc.ref, {
         status: 'completed',
         completedAt,

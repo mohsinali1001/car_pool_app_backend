@@ -464,6 +464,7 @@ const acceptCustomerFare = async (req, res) => {
       captainVehicleType: captain.captainVehicleType || '',
       captainVehicleInfo: vehicleParts.join(' '),
       captainVehicleRegistration: captain.vehicleRegistration || '',
+      captainVehiclePhotoUrl: captain.vehiclePhotoUrl || '',
       availableSeats: parseInt(captain.vehicleSeats || 1, 10) || 1,
       customerId: request.customerId,
       fare: agreedFare,
@@ -509,6 +510,7 @@ const acceptCustomerFare = async (req, res) => {
       acceptedDealId: dealRef.id,
       captainPhoneRevealed: true,
       customerPhoneRevealed: true,
+      acceptedAt: now,
       updatedAt: now,
     });
     batch.set(rideRef, {
@@ -654,6 +656,7 @@ const createOffer = async (req, res) => {
       captainVehicleType: captain.captainVehicleType || '',
       captainVehicleInfo: vehicleParts.join(' '),
       captainVehicleRegistration: captain.vehicleRegistration || '',
+      captainVehiclePhotoUrl: captain.vehiclePhotoUrl || '',
       availableSeats: parseInt(captain.vehicleSeats || 1, 10) || 1,
       customerId: request.customerId,
       fare: amount,
@@ -730,6 +733,7 @@ const respondOffer = async (req, res) => {
         acceptedDealId: dealRef.id,
         captainPhoneRevealed: true,
         customerPhoneRevealed: true,
+        acceptedAt: now,
         ...pickupUpdate,
         updatedAt: now,
       });

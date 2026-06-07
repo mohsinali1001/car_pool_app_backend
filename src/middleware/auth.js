@@ -3,20 +3,17 @@ const { auth } = require('../config/firebase');
 const verifyToken = async (req, res, next) => {
   const header = req.headers.authorization;
   if (!header || !header.startsWith('Bearer ')) {
-    console.warn('AuthMiddleware: No Bearer token in headers');
-    return res.status(401).json({ error: 'No token provided' });
+    return res.status(401).json({ error: 'No token provided', code: 'NO_TOKEN' });
   }
 
   const token = header.split('Bearer ')[1];
   try {
-    console.log(`AuthMiddleware: Verifying token (length: ${token.length})...`);
     const decoded = await auth.verifyIdToken(token);
-    console.log(`AuthMiddleware: Token verified for UID: ${decoded.uid}`);
     req.user = decoded;
     next();
   } catch (err) {
-    console.error('AuthMiddleware: Token verification FAILED:', err.message);
-    return res.status(401).json({ error: 'Invalid or expired token', detail: err.message });
+    console.warn('AuthMiddleware: token rejected');
+    return res.status(401).json({ error: 'Invalid or expired token', code: 'INVALID_TOKEN' });
   }
 };
 

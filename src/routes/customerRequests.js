@@ -25,5 +25,6 @@ router.patch('/:requestId/offers/:offerId', verifyToken, (req, res) => {
   }
   return requireCaptain(req, res, () => updateOffer(req, res));
 });
+router.patch('/:requestId/offers/:offerId/respond', verifyToken, respondOffer);
 
 module.exports = router;

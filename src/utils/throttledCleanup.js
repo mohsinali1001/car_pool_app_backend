@@ -2,7 +2,7 @@ const { cleanupExpiredRides, cleanupExpiredCustomerRequests } = require('./lifec
 
 let lastRideCleanup = 0;
 let lastRequestCleanup = 0;
-const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+const CLEANUP_INTERVAL_MS = 60 * 1000;
 
 async function maybeCleanupExpiredRides() {
   const now = Date.now();

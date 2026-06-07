@@ -222,6 +222,7 @@ const postRide = async (req, res) => {
       isLadiesRide: ((userData.gender || '').toString().toLowerCase() === 'female'),
       acceptsDelivery: acceptsDelivery || false,
       vehicleInfo: vehicleInfo || `${userData.vehicleMake || ''} ${userData.vehicleModel || ''}`.trim() || 'Not Specified',
+      vehiclePhotoUrl: userData.vehiclePhotoUrl || '',
       status: 'active',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
