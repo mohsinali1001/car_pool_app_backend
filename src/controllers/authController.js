@@ -6,9 +6,6 @@ const ALLOWED_USER_FIELDS = [
   'phone',
   'role',
   'gender',
-  'cnic',
-  'cnicFrontUrl',
-  'cnicBackUrl',
   'vehicleMake',
   'vehicleModel',
   'vehicleColor',
@@ -18,8 +15,6 @@ const ALLOWED_USER_FIELDS = [
   'city',
   'vehiclePhotoUrl',
   'captainVehicleType',
-  'emergencyContactName',
-  'emergencyContactPhone',
   'captainVerificationStatus',
 ];
 
@@ -110,9 +105,6 @@ const syncUser = async (req, res) => {
         captainVerificationStatus:
           body.captainVerificationStatus ||
           (isCaptain ? 'pending_verification' : null),
-        cnicFrontUrl: body.cnicFrontUrl || null,
-        cnicBackUrl: body.cnicBackUrl || null,
-        cnic: body.cnic || null,
         vehicleMake: body.vehicleMake || null,
         vehicleModel: body.vehicleModel || null,
         vehicleColor: body.vehicleColor || null,
@@ -122,8 +114,6 @@ const syncUser = async (req, res) => {
         city: body.city || null,
         vehiclePhotoUrl: body.vehiclePhotoUrl || null,
         captainVehicleType: body.captainVehicleType || null,
-        emergencyContactName: body.emergencyContactName || null,
-        emergencyContactPhone: body.emergencyContactPhone || null,
         rating: 0.0,
         totalRides: 0,
         fcmToken: null,

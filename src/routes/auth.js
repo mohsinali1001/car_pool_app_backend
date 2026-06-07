@@ -24,9 +24,6 @@ router.patch('/profile/captain', verifyToken, async (req, res) => {
     phone,
     gender,
     captainVerificationStatus,
-    cnicFrontUrl,
-    cnicBackUrl,
-    cnic,
     city,
     vehicleMake,
     vehicleModel,
@@ -35,8 +32,6 @@ router.patch('/profile/captain', verifyToken, async (req, res) => {
     vehicleRegistration,
     vehicleYear,
     vehicleSeats,
-    emergencyContactName,
-    emergencyContactPhone,
   } = req.body;
 
   try {
@@ -87,9 +82,6 @@ router.patch('/profile/captain', verifyToken, async (req, res) => {
     };
 
     setIfPresent('phone', phone, (v) => String(v).trim());
-    setIfPresent('cnicFrontUrl', cnicFrontUrl, (v) => String(v).trim());
-    setIfPresent('cnicBackUrl', cnicBackUrl, (v) => String(v).trim());
-    setIfPresent('cnic', cnic, (v) => String(v).trim());
     setIfPresent('city', city, (v) => String(v).trim());
     setIfPresent('vehicleMake', vehicleMake, (v) => String(v).trim());
     setIfPresent('vehicleModel', vehicleModel, (v) => String(v).trim());
@@ -98,8 +90,6 @@ router.patch('/profile/captain', verifyToken, async (req, res) => {
     setIfPresent('vehicleRegistration', vehicleRegistration, (v) => String(v).trim());
     setIfPresent('vehicleYear', vehicleYear);
     setIfPresent('vehicleSeats', vehicleSeats);
-    setIfPresent('emergencyContactName', emergencyContactName, (v) => String(v).trim());
-    setIfPresent('emergencyContactPhone', emergencyContactPhone, (v) => String(v).trim());
 
     if (gender !== undefined) {
       updateData.gender = genderValue;

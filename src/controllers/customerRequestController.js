@@ -129,10 +129,12 @@ const createCustomerRequest = async (req, res) => {
     sanitizeString(labelFromLocation(startLocation) || rawPickupLocation, MAX_LOCATION);
   const rawEndLocation =
     sanitizeString(labelFromLocation(endLocation) || rawDropLocation, MAX_LOCATION);
-  const parsedStartLat = parseNumber(startLat ?? pickupLat);
-  const parsedStartLng = parseNumber(startLng ?? pickupLng);
-  const parsedEndLat = parseNumber(endLat ?? dropLat);
-  const parsedEndLng = parseNumber(endLng ?? dropLng);
+  let parsedStartLat = parseNumber(startLat ?? pickupLat);
+  let parsedStartLng = parseNumber(startLng ?? pickupLng);
+  let parsedEndLat = parseNumber(endLat ?? dropLat);
+  let parsedEndLng = parseNumber(endLng ?? dropLng);
+  const parsedCustomerLat = parseNumber(customerLat);
+  const parsedCustomerLng = parseNumber(customerLng);
   const parsedRequestedAt = requestedAt
     ? new Date(requestedAt)
     : new Date(Date.now() + 60 * 60 * 1000);
@@ -146,16 +148,36 @@ const createCustomerRequest = async (req, res) => {
   }
 
   if (
+    (!isValidLat(parsedStartLat) ||
+      !isValidLng(parsedStartLng) ||
+      isZeroCoordinate(parsedStartLat, parsedStartLng)) &&
+    isValidLat(parsedCustomerLat) &&
+    isValidLng(parsedCustomerLng) &&
+    !isZeroCoordinate(parsedCustomerLat, parsedCustomerLng)
+  ) {
+    parsedStartLat = parsedCustomerLat;
+    parsedStartLng = parsedCustomerLng;
+  }
+  if (
+    (!isValidLat(parsedEndLat) ||
+      !isValidLng(parsedEndLng) ||
+      isZeroCoordinate(parsedEndLat, parsedEndLng)) &&
+    isValidLat(parsedStartLat) &&
+    isValidLng(parsedStartLng)
+  ) {
+    parsedEndLat = parsedStartLat;
+    parsedEndLng = parsedStartLng;
+  }
+
+  if (
     !isValidLat(parsedStartLat) ||
     !isValidLng(parsedStartLng) ||
     !isValidLat(parsedEndLat) ||
-    !isValidLng(parsedEndLng) ||
-    isZeroCoordinate(parsedStartLat, parsedStartLng) ||
-    isZeroCoordinate(parsedEndLat, parsedEndLng)
+    !isValidLng(parsedEndLng)
   ) {
     return res.status(400).json({
       success: false,
-      error: 'Map pickup and drop coordinates are required',
+      error: 'Unable to resolve route location. Type a clearer area or use current location.',
       code: 'MAP_COORDINATES_REQUIRED',
     });
   }
@@ -215,8 +237,8 @@ const createCustomerRequest = async (req, res) => {
       startLng: parsedStartLng,
       endLat: parsedEndLat,
       endLng: parsedEndLng,
-      customerLat: parseNumber(customerLat),
-      customerLng: parseNumber(customerLng),
+      customerLat: parsedCustomerLat,
+      customerLng: parsedCustomerLng,
       city: (city || user.city || '').toString().trim(),
       status: 'open',
       createdAt: now,
