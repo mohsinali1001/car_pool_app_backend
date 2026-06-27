@@ -44,7 +44,6 @@ function isZeroCoordinate(lat, lng) {
   return Number(lat) === 0 && Number(lng) === 0;
 }
 
-<<<<<<< HEAD
 function isRideUpcoming(ride, now = new Date()) {
   const status = (ride.status || '').toString().toLowerCase();
   if (!['active', 'in_progress'].includes(status)) return false;
@@ -52,8 +51,6 @@ function isRideUpcoming(ride, now = new Date()) {
   return !Number.isNaN(departure.getTime()) && departure > now;
 }
 
-=======
->>>>>>> 8014cc70a65325c086dc7cabeeefe1f5034855c2
 const postRide = async (req, res) => {
   const uid = req.user ? req.user.uid : req.body.captainId;
   if (!uid) return res.status(400).json({ success: false, error: 'Captain ID is required', code: 'MISSING_CAPTAIN_ID' });
@@ -306,10 +303,6 @@ const getActiveRides = async (req, res) => {
   const afterId = (req.query.after || '').toString().trim();
   try {
     await maybeCleanupExpiredRides();
-<<<<<<< HEAD
-    const requestTime = new Date();
-=======
->>>>>>> 8014cc70a65325c086dc7cabeeefe1f5034855c2
     const userLat = parseNumber(req.query.lat);
     const userLng = parseNumber(req.query.lng);
     let requesterGender = '';
@@ -331,13 +324,7 @@ const getActiveRides = async (req, res) => {
       query = query.orderBy('departureTime');
     }
     const snap = await query.limit(pageLimit).get();
-<<<<<<< HEAD
-    let rides = snap.docs
-      .map(d => ({ id: d.id, ...d.data() }))
-      .filter((ride) => isRideUpcoming(ride, requestTime));
-=======
     let rides = snap.docs.map(d => ({ id: d.id, ...d.data() }));
->>>>>>> 8014cc70a65325c086dc7cabeeefe1f5034855c2
     const lastDoc = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
 
     // Filter ladies rides
@@ -441,14 +428,7 @@ const getMyRides = async (req, res) => {
   try {
     await maybeCleanupExpiredRides();
     const snap = await db.collection('rides').where('captainId', '==', uid).orderBy('createdAt', 'desc').get();
-<<<<<<< HEAD
-    const now = new Date();
-    const rides = snap.docs
-      .map(d => ({ id: d.id, ...d.data() }))
-      .filter((ride) => isRideUpcoming(ride, now) || ['completed', 'cancelled'].includes((ride.status || '').toString().toLowerCase()));
-=======
     const rides = snap.docs.map(d => ({ id: d.id, ...d.data() }));
->>>>>>> 8014cc70a65325c086dc7cabeeefe1f5034855c2
     return res.json({ success: true, rides });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message, code: 'GET_MY_RIDES_ERROR' });
@@ -461,17 +441,8 @@ const getRideById = async (req, res) => {
     await maybeCleanupExpiredRides();
     const rideDoc = await db.collection('rides').doc(rideId).get();
     if (!rideDoc.exists) return res.status(404).json({ success: false, error: 'Ride not found', code: 'RIDE_NOT_FOUND' });
-<<<<<<< HEAD
-    const ride = { id: rideDoc.id, ...rideDoc.data() };
-    if (!isRideUpcoming(ride) && (ride.status || '').toString().toLowerCase() === 'active') {
-      return res.status(404).json({ success: false, error: 'Ride has expired', code: 'RIDE_EXPIRED' });
-    }
-    res.set('Cache-Control', 'public, max-age=10');
-    return res.json({ success: true, ride });
-=======
     res.set('Cache-Control', 'public, max-age=10');
     return res.json({ success: true, ride: { id: rideDoc.id, ...rideDoc.data() } });
->>>>>>> 8014cc70a65325c086dc7cabeeefe1f5034855c2
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message, code: 'GET_RIDE_BY_ID_ERROR' });
   }

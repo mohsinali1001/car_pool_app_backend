@@ -81,27 +81,32 @@ app.set('trust proxy', 1);
 // Security Middlewares
 app.use(helmet());
 app.use(globalLimiter); // Global Security
-<<<<<<< HEAD
-const allowedOrigins = new Set([
+
+// CORS Configuration - Allows both local and production
+const allowedOrigins = [
   'http://192.168.1.6:7860',
   'http://192.168.1.6',
   'http://localhost:3000',
   'http://localhost:7860',
   'http://127.0.0.1:7860',
-]);
+  'https://huzaifa1435-carpool.hf.space'
+];
+
 app.use(cors({
-  origin(origin, callback) {
-    if (!origin || allowedOrigins.has(origin)) return callback(null, true);
-    return callback(new Error(`CORS blocked for origin: ${origin}`));
+  origin: function(origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      return callback(null, true);
+    } else {
+      return callback(new Error('Not allowed by CORS'), false);
+    }
   },
-=======
-app.use(cors({
-  origin: ['https://huzaifa1435-carpool.hf.space', 'http://localhost:3000'],
->>>>>>> 8014cc70a65325c086dc7cabeeefe1f5034855c2
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
 }));
+
 app.use(compression());
 app.use(morgan('dev'));
 app.use(express.json({ limit: '10kb' })); // Anti-DOS payload limit
@@ -120,7 +125,7 @@ app.use('/api/notifications', notificationRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
-// Backward-compatible root routes for older mobile builds.
+// Backward-compatible root routes for older mobile builds
 app.use('/auth', authLimiter, authRoutes);
 app.use('/rides', rideLimiter, rideRoutes);
 app.use('/deals', dealLimiter, dealRoutes);
