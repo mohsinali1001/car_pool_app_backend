@@ -1,0 +1,113 @@
+const { db } = require('../config/firebase');
+const { ensureWallet, getBalance, addBalance } = require('../utils/walletHelper');
+
+const getWallet = async (req, res) => {
+  try {
+    const wallet = await ensureWallet(req.user.uid);
+    return res.json({ success: true, wallet });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message, code: 'GET_WALLET_ERROR' });
+  }
+};
+
+const getTransactions = async (req, res) => {
+  try {
+    const snap = await db
+      .collection('transactions')
+      .where('walletId', '==', req.user.uid)
+      .orderBy('createdAt', 'desc')
+      .limit(50)
+      .get();
+    const transactions = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    return res.json({ success: true, count: transactions.length, transactions });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message, code: 'GET_TRANSACTIONS_ERROR' });
+  }
+};
+
+const topUpWallet = async (req, res) => {
+  // TODO: Replace with a real payment gateway verification before production.
+  const topupSecret = process.env.TOPUP_SECRET;
+  const providedSecret = req.headers['x-topup-secret'];
+  if (!topupSecret || providedSecret !== topupSecret) {
+    return res.status(403).json({ success: false, error: 'Forbidden', code: 'TOPUP_FORBIDDEN' });
+  }
+
+  const { amount, reference } = req.body;
+  const parsedAmount = parseFloat(amount);
+  if (!Number.isFinite(parsedAmount) || parsedAmount <= 0 || parsedAmount > 50000) {
+    return res.status(400).json({ success: false, error: 'Invalid amount', code: 'INVALID_AMOUNT' });
+  }
+  try {
+    const newBalance = await addBalance(req.user.uid, parsedAmount, {
+      type: 'topup',
+      description: 'Manual top-up',
+      reference: reference || `manual_${Date.now()}`,
+    });
+    const wallet = await ensureWallet(req.user.uid);
+    return res.status(201).json({
+      success: true,
+      message: 'Wallet topped up',
+      wallet: { ...wallet, balance: newBalance },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message, code: 'TOPUP_ERROR' });
+  }
+};
+
+const getEarningsSummary = async (req, res) => {
+  try {
+    const snap = await db
+      .collection('transactions')
+      .where('walletId', '==', req.user.uid)
+      .orderBy('createdAt', 'desc')
+      .limit(100)
+      .get();
+
+    const transactions = snap.docs.map((d) => d.data());
+    let totalCredit = 0;
+    let totalDebit = 0;
+    const weekBuckets = [0, 0, 0, 0, 0, 0, 0];
+    const now = new Date();
+
+    for (const tx of transactions) {
+      const amt = Math.abs(Number(tx.amount || 0));
+      if (tx.type === 'commission_deduction') {
+        totalDebit += amt;
+      } else if (tx.type === 'commission') {
+        totalDebit += amt;
+      } else {
+        totalCredit += amt;
+      }
+      const created = new Date(tx.createdAt);
+      const diffDays = Math.floor((now - created) / (1000 * 60 * 60 * 24));
+      if (diffDays >= 0 && diffDays < 7) {
+        const idx = 6 - diffDays;
+        const isDebit = tx.type === 'commission_deduction' || tx.type === 'commission';
+        weekBuckets[idx] += isDebit ? -amt : amt;
+      }
+    }
+
+    const ridesSnap = await db
+      .collection('rides')
+      .where('captainId', '==', req.user.uid)
+      .where('status', '==', 'completed')
+      .get();
+
+    return res.json({
+      success: true,
+      summary: {
+        totalEarnings: totalCredit,
+        totalCommission: totalDebit,
+        netEarned: totalCredit - totalDebit,
+        ridesCompleted: ridesSnap.size,
+        weekData: weekBuckets.map((v) => Math.max(0, v)),
+        balance: await getBalance(req.user.uid),
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message, code: 'EARNINGS_SUMMARY_ERROR' });
+  }
+};
+
+module.exports = { getWallet, getTransactions, topUpWallet, getEarningsSummary };
