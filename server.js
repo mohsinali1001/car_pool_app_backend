@@ -7,8 +7,7 @@ const app = require('./src/app');
 // ===== PORT CONFIGURATION =====
 // Hugging Face uses PORT environment variable, default 7860
 const PORT = Number(process.env.PORT || 7860);
-// For Hugging Face, use '0.0.0.0' to listen on all interfaces
-const HOST = process.env.NODE_ENV === 'production' ? '0.0.0.0' : '192.168.1.6';
+const HOST = '0.0.0.0';  // Listen on all interfaces (required for Hugging Face)
 
 // ===== START SERVER =====
 const server = app.listen(PORT, HOST, () => {
