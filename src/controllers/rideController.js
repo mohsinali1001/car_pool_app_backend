@@ -91,6 +91,51 @@ function formatRideDateTime(value) {
   }
 }
 
+function locationsOverlap(queryStart, queryEnd, rideStart, rideEnd) {
+  const qs = (queryStart || '').toLowerCase();
+  const qe = (queryEnd || '').toLowerCase();
+  const rs = (rideStart || '').toLowerCase();
+  const re = (rideEnd || '').toLowerCase();
+
+  const sequence = [
+    'peshawar', 
+    'nowshera', 
+    'attock', 
+    'wah cantt', 
+    'wah', 
+    'taxila', 
+    'rawalpindi', 
+    'pindi', 
+    'islamabad', 
+    'isb'
+  ];
+
+  const findIndex = (loc) => {
+    return sequence.findIndex(item => loc.includes(item));
+  };
+
+  const qStartIdx = findIndex(qs);
+  const qEndIdx = findIndex(qe);
+  const rStartIdx = findIndex(rs);
+  const rEndIdx = findIndex(re);
+
+  if (qStartIdx !== -1 && qEndIdx !== -1 && rStartIdx !== -1 && rEndIdx !== -1) {
+    const queryDir = qEndIdx - qStartIdx;
+    const rideDir = rEndIdx - rStartIdx;
+
+    if ((queryDir > 0 && rideDir > 0) || (queryDir < 0 && rideDir < 0)) {
+      const qMin = Math.min(qStartIdx, qEndIdx);
+      const qMax = Math.max(qStartIdx, qEndIdx);
+      const rMin = Math.min(rStartIdx, rEndIdx);
+      const rMax = Math.max(rStartIdx, rEndIdx);
+
+      return Math.max(qMin, rMin) <= Math.min(qMax, rMax);
+    }
+  }
+
+  return rs.includes(qs) && re.includes(qe);
+}
+
 function serializeRide(id, data) {
   const ride = { id, ...data };
   const displayDateTime = formatRideDateTime(ride.departureTime);
@@ -408,15 +453,18 @@ const getActiveRides = async (req, res) => {
       }
     }
 
-    // Filter by location (text-based)
-    if (startLocation) {
-      const q = startLocation.toLowerCase();
-      rides = rides.filter(r => r.startLocation.toLowerCase().includes(q));
-    }
-
-    if (endLocation) {
-      const q = endLocation.toLowerCase();
-      rides = rides.filter(r => r.endLocation.toLowerCase().includes(q));
+    // Filter by location (route-overlap intelligent check)
+    if (startLocation && endLocation) {
+      rides = rides.filter(r => locationsOverlap(startLocation, endLocation, r.startLocation, r.endLocation));
+    } else {
+      if (startLocation) {
+        const q = startLocation.toLowerCase();
+        rides = rides.filter(r => r.startLocation.toLowerCase().includes(q));
+      }
+      if (endLocation) {
+        const q = endLocation.toLowerCase();
+        rides = rides.filter(r => r.endLocation.toLowerCase().includes(q));
+      }
     }
 
     if (userLat != null && userLng != null) {
