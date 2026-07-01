@@ -86,6 +86,56 @@ function requestDistance(captainLat, captainLng, request) {
   };
 }
 
+function formatRequestDateTime(value) {
+  const date = new Date(value || '');
+  if (Number.isNaN(date.getTime())) return null;
+  try {
+    const formatter = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Karachi',
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    });
+    const parts = formatter.formatToParts(date);
+    const day = parts.find(p => p.type === 'day').value;
+    const month = parts.find(p => p.type === 'month').value;
+    const year = parts.find(p => p.type === 'year').value;
+    const hour = parts.find(p => p.type === 'hour').value;
+    const minute = parts.find(p => p.type === 'minute').value;
+    const dayPeriod = parts.find(p => p.type === 'dayPeriod').value.toLowerCase();
+    
+    const minutesStr = minute === '00' ? '' : `:${minute}`;
+    const timeStr = `${hour}${minutesStr} ${dayPeriod}`;
+    
+    return `${day} ${month} ${year} time ${timeStr}`;
+  } catch (e) {
+    const day = date.getDate();
+    const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    const month = months[date.getMonth()];
+    const year = date.getFullYear();
+    let hours = date.getHours();
+    const minutes = date.getMinutes();
+    const ampm = hours >= 12 ? 'pm' : 'am';
+    hours = hours % 12;
+    hours = hours ? hours : 12;
+    const minutesStr = minutes === 0 ? '' : `:${minutes.toString().padStart(2, '0')}`;
+    return `${day} ${month} ${year} time ${hours}${minutesStr} ${ampm}`;
+  }
+}
+
+function serializeCustomerRequest(request) {
+  const displayDateTime = formatRequestDateTime(request.requestedAt);
+  return {
+    ...request,
+    routeLabel: `${request.startLocation || ''} -> ${request.endLocation || ''}`.trim(),
+    requestedAtDisplay: displayDateTime,
+    displayDateTime,
+  };
+}
+
 const createCustomerRequest = async (req, res) => {
   const uid = req.user.uid;
   const {
@@ -185,6 +235,9 @@ const createCustomerRequest = async (req, res) => {
   if (Number.isNaN(parsedRequestedAt.getTime())) {
     return res.status(400).json({ success: false, error: 'requestedAt is invalid', code: 'INVALID_REQUESTED_AT' });
   }
+  if (parsedRequestedAt <= new Date()) {
+    return res.status(400).json({ success: false, error: 'requestedAt must be in the future', code: 'PAST_REQUESTED_AT' });
+  }
 
   try {
     const userDoc = await db.collection('users').doc(uid).get();
@@ -270,7 +323,7 @@ const createCustomerRequest = async (req, res) => {
       console.error('Customer request notification error:', notifyErr.message);
     }
 
-    return res.status(201).json({ success: true, request });
+    return res.status(201).json({ success: true, request: serializeCustomerRequest(request) });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message, code: 'CREATE_CUSTOMER_REQUEST_ERROR' });
   }
@@ -322,7 +375,7 @@ const getOpenCustomerRequests = async (req, res) => {
       }
     }
     requests = requests.map((r) => ({
-      ...sanitizeRequestForCaptain(r),
+      ...serializeCustomerRequest(sanitizeRequestForCaptain(r)),
       myOffer: myOfferByRequest[r.id] || null,
     }));
 
@@ -349,7 +402,7 @@ const getMyCustomerRequests = async (req, res) => {
       .limit(100)
       .get();
     let requests = await Promise.all(
-      snap.docs.map((doc) => attachOffers({ id: doc.id, ...doc.data() })),
+      snap.docs.map((doc) => attachOffers(serializeCustomerRequest({ id: doc.id, ...doc.data() }))),
     );
     requests.sort((a, b) =>
       String(b.createdAt || '').localeCompare(String(a.createdAt || '')),

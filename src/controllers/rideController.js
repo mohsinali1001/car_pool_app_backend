@@ -51,6 +51,57 @@ function isRideUpcoming(ride, now = new Date()) {
   return !Number.isNaN(departure.getTime()) && departure > now;
 }
 
+function formatRideDateTime(value) {
+  const date = new Date(value || '');
+  if (Number.isNaN(date.getTime())) return null;
+  try {
+    const formatter = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Karachi',
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    });
+    const parts = formatter.formatToParts(date);
+    const day = parts.find(p => p.type === 'day').value;
+    const month = parts.find(p => p.type === 'month').value;
+    const year = parts.find(p => p.type === 'year').value;
+    const hour = parts.find(p => p.type === 'hour').value;
+    const minute = parts.find(p => p.type === 'minute').value;
+    const dayPeriod = parts.find(p => p.type === 'dayPeriod').value.toLowerCase();
+    
+    const minutesStr = minute === '00' ? '' : `:${minute}`;
+    const timeStr = `${hour}${minutesStr} ${dayPeriod}`;
+    
+    return `${day} ${month} ${year} time ${timeStr}`;
+  } catch (e) {
+    const day = date.getDate();
+    const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    const month = months[date.getMonth()];
+    const year = date.getFullYear();
+    let hours = date.getHours();
+    const minutes = date.getMinutes();
+    const ampm = hours >= 12 ? 'pm' : 'am';
+    hours = hours % 12;
+    hours = hours ? hours : 12;
+    const minutesStr = minutes === 0 ? '' : `:${minutes.toString().padStart(2, '0')}`;
+    return `${day} ${month} ${year} time ${hours}${minutesStr} ${ampm}`;
+  }
+}
+
+function serializeRide(id, data) {
+  const ride = { id, ...data };
+  const displayDateTime = formatRideDateTime(ride.departureTime);
+  return {
+    ...ride,
+    routeLabel: `${ride.startLocation || ''} -> ${ride.endLocation || ''}`.trim(),
+    departureDisplay: displayDateTime,
+    displayDateTime,
+  };
+}
+
 const postRide = async (req, res) => {
   const uid = req.user ? req.user.uid : req.body.captainId;
   if (!uid) return res.status(400).json({ success: false, error: 'Captain ID is required', code: 'MISSING_CAPTAIN_ID' });
@@ -290,7 +341,7 @@ const postRide = async (req, res) => {
       console.error('Ride notification error:', notifyErr.message);
     }
 
-    return res.status(201).json({ success: true, message: 'Ride posted successfully!', rideId: ref.id, ride: { id: ref.id, ...ride } });
+    return res.status(201).json({ success: true, message: 'Ride posted successfully!', rideId: ref.id, ride: serializeRide(ref.id, ride) });
   } catch (err) {
     console.error('CRITICAL ERROR in postRide:', err);
     return res.status(500).json({ success: false, error: 'Internal Server Error: ' + err.message, code: 'POST_RIDE_ERROR' });
@@ -324,7 +375,7 @@ const getActiveRides = async (req, res) => {
       query = query.orderBy('departureTime');
     }
     const snap = await query.limit(pageLimit).get();
-    let rides = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    let rides = snap.docs.map(d => serializeRide(d.id, d.data()));
     const lastDoc = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
 
     // Filter ladies rides
@@ -428,7 +479,7 @@ const getMyRides = async (req, res) => {
   try {
     await maybeCleanupExpiredRides();
     const snap = await db.collection('rides').where('captainId', '==', uid).orderBy('createdAt', 'desc').get();
-    const rides = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const rides = snap.docs.map(d => serializeRide(d.id, d.data()));
     return res.json({ success: true, rides });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message, code: 'GET_MY_RIDES_ERROR' });
@@ -442,7 +493,7 @@ const getRideById = async (req, res) => {
     const rideDoc = await db.collection('rides').doc(rideId).get();
     if (!rideDoc.exists) return res.status(404).json({ success: false, error: 'Ride not found', code: 'RIDE_NOT_FOUND' });
     res.set('Cache-Control', 'public, max-age=10');
-    return res.json({ success: true, ride: { id: rideDoc.id, ...rideDoc.data() } });
+    return res.json({ success: true, ride: serializeRide(rideDoc.id, rideDoc.data()) });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message, code: 'GET_RIDE_BY_ID_ERROR' });
   }
