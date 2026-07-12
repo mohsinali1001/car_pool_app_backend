@@ -179,8 +179,144 @@ async function getCaptainReviewSummary(captainId, limit = 5) {
   };
 }
 
+// ---------- REUSABLE CONFIRM TRANSACTION ----------
+/**
+ * Internal function to execute the confirm transaction.
+ * Can be called by confirmDeal (captain/customer manual) or auto-confirm.
+ * Throws error if insufficient balance, ride full, etc.
+ */
+async function _executeConfirmTransaction(dealId, actorUid, options = {}) {
+  const { skipOwnershipCheck = false } = options;
+
+  const dealRef = db.collection('deals').doc(dealId);
+  const dealSnap = await dealRef.get();
+  if (!dealSnap.exists) throw Object.assign(new Error('Deal not found'), { code: 'DEAL_NOT_FOUND' });
+  const preDeal = dealSnap.data();
+
+  const isCaptain = preDeal.captainId === actorUid;
+  const isCustomer = preDeal.customerId === actorUid;
+
+  // Allow actor if they are captain or customer (or skip check for auto)
+  if (!skipOwnershipCheck && !isCaptain && !isCustomer) {
+    throw Object.assign(new Error('Not your deal'), { code: 'UNAUTHORIZED' });
+  }
+
+  // For manual confirm: if customer (not captain) confirms, only if lastCounterBy === 'captain'
+  if (!skipOwnershipCheck && isCustomer && preDeal.lastCounterBy !== 'captain') {
+    throw Object.assign(new Error('Only captain can confirm this deal'), { code: 'UNAUTHORIZED' });
+  }
+
+  if (preDeal.status !== DEAL_STATUS.PENDING) {
+    throw Object.assign(new Error('Deal already processed'), { code: 'INVALID_STATE' });
+  }
+
+  const captainId = preDeal.captainId;
+  const rideRef = db.collection('rides').doc(preDeal.rideId);
+  const walletRef = db.collection('wallets').doc(captainId);
+  const commission = parseFloat(preDeal.agreedFare || 0) * PLATFORM_FEE_PERCENT;
+  const now = new Date().toISOString();
+  let newBalance = 0;
+  let customerId = preDeal.customerId;
+
+  await db.runTransaction(async (t) => {
+    const dealDoc = await t.get(dealRef);
+    if (!dealDoc.exists) throw Object.assign(new Error('Deal not found'), { code: 'DEAL_NOT_FOUND' });
+    const deal = dealDoc.data();
+    if (!skipOwnershipCheck && deal.captainId !== captainId) {
+      throw Object.assign(new Error('Not your deal'), { code: 'UNAUTHORIZED' });
+    }
+    if (!skipOwnershipCheck && isCustomer && deal.lastCounterBy !== 'captain') {
+      throw Object.assign(new Error('Only captain can confirm this deal'), { code: 'UNAUTHORIZED' });
+    }
+    if (deal.status !== DEAL_STATUS.PENDING) {
+      throw Object.assign(new Error('Deal already processed'), { code: 'INVALID_STATE' });
+    }
+
+    const rideDoc = await t.get(rideRef);
+    if (!rideDoc.exists) throw new Error('Ride not found');
+    const ride = rideDoc.data();
+    const available = ride.availableSeats ?? ride.totalSeats ?? 0;
+    if (available <= 0) {
+      throw Object.assign(new Error('Ride is full'), { code: 'RIDE_FULL', statusCode: 400 });
+    }
+
+    const walletDoc = await t.get(walletRef);
+    let currentBalance = walletDoc.exists
+      ? Number(walletDoc.data().balance || 0)
+      : CAPTAIN_STARTER_BALANCE;
+
+    if (currentBalance < commission) {
+      throw Object.assign(new Error('Insufficient wallet balance to confirm deal'), {
+        code: 'INSUFFICIENT_BALANCE',
+        statusCode: 400,
+        required: commission,
+        current: currentBalance,
+      });
+    }
+
+    newBalance = currentBalance - commission;
+    customerId = deal.customerId;
+
+    const { available: newSeats } = seatUpdateFromRide(ride, -1);
+    const rideUpdates = {
+      availableSeats: newSeats,
+      full: newSeats <= 0,
+      updatedAt: now,
+    };
+    if (newSeats <= 0) {
+      rideUpdates.status = RIDE_STATUS.FILLED;
+    }
+    t.update(rideRef, rideUpdates);
+
+    t.set(
+      walletRef,
+      {
+        id: captainId,
+        userId: captainId,
+        balance: newBalance,
+        updatedAt: now,
+      },
+      { merge: true },
+    );
+
+    const txRef = db.collection('transactions').doc();
+    t.set(txRef, {
+      walletId: captainId,
+      type: 'commission',
+      amount: commission,
+      reference: dealId,
+      description: `5% commission for deal ${dealId}`,
+      balanceAfter: newBalance,
+      createdAt: now,
+    });
+
+    t.update(dealRef, {
+      status: DEAL_STATUS.CONFIRMED,
+      phoneRevealed: true,
+      confirmedAt: now,
+      confirmedBy: skipOwnershipCheck ? 'system' : (isCustomer ? 'customer' : 'captain'),
+      updatedAt: now,
+    });
+  });
+
+  await syncRideStatusFromDeals(preDeal.rideId);
+
+  // Notify the other party
+  const notifyRecipient = (isCustomer || skipOwnershipCheck) ? captainId : customerId;
+  await pushToUser(notifyRecipient, {
+    title: 'Booking confirmed',
+    body: 'Your ride booking has been confirmed.',
+    type: 'deal_confirmed',
+    data: { dealId },
+  });
+
+  return { commission, newBalance };
+}
+// ------------------------------------------------
+
 /**
  * ✅ FIXED: createDeal - Allow captain to book own ride (testing mode)
+ * ✅ Auto-confirm if agreedFare === suggestedFare
  */
 const createDeal = async (req, res) => {
   const uid = req.user.uid;
@@ -222,7 +358,6 @@ const createDeal = async (req, res) => {
   }
 
   try {
-    // ✅ FIX: Check if customer is booking their own ride
     const rideRef = db.collection('rides').doc(rideId);
     const rideDoc = await rideRef.get();
     if (!rideDoc.exists) {
@@ -231,11 +366,8 @@ const createDeal = async (req, res) => {
     
     const rideData = rideDoc.data();
     const isSelfBooking = rideData.captainId === uid;
-    
-    // ⚠️ Warning: Captain booking own ride (testing only)
     if (isSelfBooking) {
       console.warn(`⚠️ Captain ${uid} is booking their own ride ${rideId} - Testing mode`);
-      // Allow it for testing (in production, you might want to block this)
     }
 
     const existing = await db
@@ -260,6 +392,10 @@ const createDeal = async (req, res) => {
     const captainId = rideData.captainId;
     const captainUserDoc = await db.collection('users').doc(captainId).get();
     const captainPhone = captainUserDoc.exists ? (captainUserDoc.data().phone || '') : '';
+
+    // Determine if fare matches (no negotiation)
+    const suggestedFare = Number(rideData.suggestedFare || 0);
+    const isNegotiated = parseFloat(agreedFare) !== suggestedFare;
 
     const dealData = await db.runTransaction(async (t) => {
       const ride = await t.get(rideRef);
@@ -293,7 +429,7 @@ const createDeal = async (req, res) => {
         phoneRevealed: false,
         agreedFare: parseFloat(agreedFare),
         platformFee,
-        status: DEAL_STATUS.PENDING,
+        status: DEAL_STATUS.PENDING, // will be updated to CONFIRMED if auto-confirm
         customerMessage: sanitizedMessage,
         passengerPickupLat: pickupLat,
         passengerPickupLng: pickupLng,
@@ -303,16 +439,7 @@ const createDeal = async (req, res) => {
         passengerDropAddress: dropAddress || labelFromLocation(rideData.endLocation),
         pickupOrder: null,
         boardingStatus: 'waiting',
-<<<<<<< HEAD
-        // ✅ True only if the passenger changed the fare away from the
-        // ride's original listed price before booking. When this is
-        // false, the passenger accepted the fixed asking price directly,
-        // so the captain's Requests screen hides the "Adjust Fare"
-        // control for this request (there's nothing left to negotiate).
-        isNegotiated: parseFloat(agreedFare) !== Number(rideData.suggestedFare || 0),
-=======
->>>>>>> bfa8cac1341b9747bc346d5e6a617496b8f28346
-        rating: null,
+        isNegotiated,
         review: null,
         confirmedAt: null,
         completedAt: null,
@@ -322,9 +449,30 @@ const createDeal = async (req, res) => {
       return data;
     });
 
-    await pushToUser(dealData.captainId, {
-      title: 'New Booking Request!',
-      body: `${dealData.customerName} wants to ride with you. Tap to respond.`,
+    // ✅ AUTO-CONFIRM if fare matches and NOT a self-booking OR even if self-booking, we allow
+    // (For self-booking, we still auto-confirm if fare matches)
+    if (!isNegotiated) {
+      try {
+        await _executeConfirmTransaction(dealRef.id, uid, { skipOwnershipCheck: true });
+        console.log(`✅ Auto-confirmed deal ${dealRef.id} (fare matched)`);
+      } catch (err) {
+        // If insufficient balance or other error, keep deal pending.
+        console.warn(`⚠️ Auto-confirm failed for deal ${dealRef.id}: ${err.message}`);
+        // We might want to notify captain to add balance
+        await pushToUser(captainId, {
+          title: 'Booking received but not confirmed',
+          body: 'A passenger booked your ride, but your wallet balance is insufficient to confirm. Please add balance.',
+          type: 'wallet_insufficient',
+          data: { dealId: dealRef.id, rideId },
+        });
+        // Keep deal as PENDING
+      }
+    }
+
+    // Always notify captain about new booking (even if auto-confirmed)
+    await pushToUser(captainId, {
+      title: isNegotiated ? 'New Booking Request!' : 'New Booking Confirmed!',
+      body: `${dealData.customerName} wants to ride with you.${isNegotiated ? ' Tap to respond.' : ' It is confirmed.'}`,
       type: 'new_deal',
       data: { rideId, dealId: dealRef.id, screen: 'my-rides' },
     });
@@ -336,172 +484,20 @@ const createDeal = async (req, res) => {
 };
 
 /**
- * ✅ FIXED: confirmDeal - Captain can accept own ride (testing mode)
- * 
- * ✅ FIX: Order of checks is important!
- * 1. First check if captain is accepting their own ride -> ALLOW
- * 2. Then check if customer (not captain) can confirm -> only if lastCounterBy === 'captain'
+ * ✅ FIXED: confirmDeal - Captain or customer can confirm (with proper checks)
+ * Uses reusable _executeConfirmTransaction
  */
 const confirmDeal = async (req, res) => {
   const { dealId } = req.params;
   const uid = req.user.uid;
 
   try {
-    console.log(`🚀 confirmDeal called - User: ${uid}, Deal: ${dealId}`);
-
-    const dealRef = db.collection('deals').doc(dealId);
-    const dealSnap = await dealRef.get();
-    if (!dealSnap.exists) {
-      return res.status(404).json({ success: false, error: 'Deal not found', code: 'DEAL_NOT_FOUND' });
-    }
-    const preDeal = dealSnap.data();
-
-    const isCaptain = preDeal.captainId === uid;
-    const isCustomer = preDeal.customerId === uid;
-
-    console.log(`📋 isCaptain=${isCaptain}, isCustomer=${isCustomer}, lastCounterBy=${preDeal.lastCounterBy}`);
-
-    // ✅ FIX 1: Sirf captain OR customer hi allow karein
-    if (!isCaptain && !isCustomer) {
-      return res.status(403).json({ 
-        success: false, 
-        error: 'Not your deal', 
-        code: 'UNAUTHORIZED' 
-      });
-    }
-
-    // ✅ FIX 2: Pehle check karein ke captain apni own ride accept kar raha hai
-    // Agar captain aur customer dono same hain, toh ALLOW karein
-    if (isCaptain && isCustomer) {
-      console.warn(`⚠️ Captain ${uid} is accepting their own ride - Deal: ${dealId} - Testing mode`);
-      // ✅ ALLOW - Skip customer check
-    } 
-    // ✅ FIX 3: Sirf customer (jo captain nahi hai) ko check karein
-    else if (isCustomer && preDeal.lastCounterBy !== 'captain') {
-      return res.status(403).json({
-        success: false,
-        error: 'Only captain can confirm this deal',
-        code: 'UNAUTHORIZED',
-      });
-    }
-
-    if (preDeal.status !== DEAL_STATUS.PENDING) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Deal already processed', 
-        code: 'INVALID_STATE' 
-      });
-    }
-
-    const captainId = preDeal.captainId;
-    const rideRef = db.collection('rides').doc(preDeal.rideId);
-    const walletRef = db.collection('wallets').doc(captainId);
-    const commission = parseFloat(preDeal.agreedFare || 0) * PLATFORM_FEE_PERCENT;
-    const now = new Date().toISOString();
-    let newBalance = 0;
-    let customerId = preDeal.customerId;
-
-    await db.runTransaction(async (t) => {
-      const dealDoc = await t.get(dealRef);
-      if (!dealDoc.exists) throw Object.assign(new Error('Deal not found'), { code: 'DEAL_NOT_FOUND' });
-      const deal = dealDoc.data();
-      
-      // ✅ FIX 4: Check captainId matches
-      if (deal.captainId !== captainId) {
-        throw Object.assign(new Error('Not your deal'), { code: 'UNAUTHORIZED' });
-      }
-      
-      // ✅ FIX 5: Customer can only confirm if captain countered
-      if (isCustomer && deal.lastCounterBy !== 'captain') {
-        throw Object.assign(new Error('Only captain can confirm this deal'), { code: 'UNAUTHORIZED' });
-      }
-      
-      if (deal.status !== DEAL_STATUS.PENDING) {
-        throw Object.assign(new Error('Deal already processed'), { code: 'INVALID_STATE' });
-      }
-
-      const rideDoc = await t.get(rideRef);
-      if (!rideDoc.exists) throw new Error('Ride not found');
-      const ride = rideDoc.data();
-      const available = ride.availableSeats ?? ride.totalSeats ?? 0;
-      if (available <= 0) {
-        throw Object.assign(new Error('Ride is full'), { code: 'RIDE_FULL', statusCode: 400 });
-      }
-
-      const walletDoc = await t.get(walletRef);
-      let currentBalance = walletDoc.exists
-        ? Number(walletDoc.data().balance || 0)
-        : CAPTAIN_STARTER_BALANCE;
-
-      if (currentBalance < commission) {
-        throw Object.assign(new Error('Insufficient wallet balance to confirm deal'), {
-          code: 'INSUFFICIENT_BALANCE',
-          statusCode: 400,
-          required: commission,
-          current: currentBalance,
-        });
-      }
-
-      newBalance = currentBalance - commission;
-      customerId = deal.customerId;
-
-      const { available: newSeats } = seatUpdateFromRide(ride, -1);
-      const rideUpdates = {
-        availableSeats: newSeats,
-        full: newSeats <= 0,
-        updatedAt: now,
-      };
-      if (newSeats <= 0) {
-        rideUpdates.status = RIDE_STATUS.FILLED;
-      }
-      t.update(rideRef, rideUpdates);
-
-      t.set(
-        walletRef,
-        {
-          id: captainId,
-          userId: captainId,
-          balance: newBalance,
-          updatedAt: now,
-        },
-        { merge: true },
-      );
-
-      const txRef = db.collection('transactions').doc();
-      t.set(txRef, {
-        walletId: captainId,
-        type: 'commission',
-        amount: commission,
-        reference: dealId,
-        description: `5% commission for deal ${dealId}`,
-        balanceAfter: newBalance,
-        createdAt: now,
-      });
-
-      t.update(dealRef, {
-        status: DEAL_STATUS.CONFIRMED,
-        phoneRevealed: true,
-        confirmedAt: now,
-        confirmedBy: isCustomer ? 'customer' : 'captain',
-        updatedAt: now,
-      });
-    });
-
-    await syncRideStatusFromDeals(preDeal.rideId);
-
-    const notifyRecipient = isCustomer ? captainId : customerId;
-    await pushToUser(notifyRecipient, {
-      title: 'Booking confirmed',
-      body: 'Your ride booking has been confirmed.',
-      type: 'deal_confirmed',
-      data: { dealId },
-    });
-
+    const result = await _executeConfirmTransaction(dealId, uid, { skipOwnershipCheck: false });
     return res.json({
       success: true,
       message: 'Deal confirmed',
-      commissionDeducted: commission,
-      newBalance,
+      commissionDeducted: result.commission,
+      newBalance: result.newBalance,
     });
   } catch (err) {
     const status = err.statusCode || (err.code === 'RIDE_FULL' || err.code === 'INSUFFICIENT_BALANCE' ? 400 : 400);
@@ -515,6 +511,9 @@ const confirmDeal = async (req, res) => {
   }
 };
 
+/**
+ * cancelDeal - unchanged except maybe small fix
+ */
 const cancelDeal = async (req, res) => {
   const { dealId } = req.params;
   const uid = req.user.uid;
@@ -577,6 +576,9 @@ const cancelDeal = async (req, res) => {
   }
 };
 
+/**
+ * counterDeal - unchanged
+ */
 const counterDeal = async (req, res) => {
   const { dealId } = req.params;
   const uid = req.user.uid;
@@ -609,6 +611,7 @@ const counterDeal = async (req, res) => {
       lastCounterBy: isCaptain ? 'captain' : 'customer',
       lastCounterAt: now,
       updatedAt: now,
+      isNegotiated: true, // counter always means negotiated
     };
     if (message != null && String(message).trim().length > 0) {
       if (exceedsMaxLength(message, MAX_CUSTOMER_MESSAGE)) {
@@ -643,7 +646,7 @@ const counterDeal = async (req, res) => {
 };
 
 /**
- * CHANGED: startDeal - Per-passenger start with boardingStatus = 'arrived'
+ * startDeal - unchanged
  */
 const startDeal = async (req, res) => {
   const { dealId } = req.params;
@@ -689,6 +692,9 @@ const startDeal = async (req, res) => {
   }
 };
 
+/**
+ * completeDeal - unchanged
+ */
 const completeDeal = async (req, res) => {
   const { dealId } = req.params;
   const uid = req.user.uid;
@@ -749,6 +755,9 @@ const completeDeal = async (req, res) => {
   }
 };
 
+/**
+ * getDeal - unchanged
+ */
 const getDeal = async (req, res) => {
   try {
     await maybeCleanupExpiredRides();
@@ -799,6 +808,9 @@ const getDeal = async (req, res) => {
   }
 };
 
+/**
+ * rateDeal - unchanged
+ */
 const rateDeal = async (req, res) => {
   const { dealId } = req.params;
   const uid = req.user.uid;
@@ -886,7 +898,7 @@ const rateDeal = async (req, res) => {
 };
 
 /**
- * CHANGED: getMyBookings - 3-day filter
+ * getMyBookings - unchanged (3-day filter)
  */
 const getMyBookings = async (req, res) => {
   try {
@@ -923,6 +935,9 @@ const getMyBookings = async (req, res) => {
   }
 };
 
+/**
+ * getConfirmedPassengers - unchanged
+ */
 const getConfirmedPassengers = async (req, res) => {
   const { rideId } = req.params;
   const uid = req.user.uid;
@@ -1004,7 +1019,7 @@ const getConfirmedPassengers = async (req, res) => {
 };
 
 /**
- * CHANGED: updateBoardingStatus - 'arrived' status added
+ * updateBoardingStatus - unchanged
  */
 const updateBoardingStatus = async (req, res) => {
   const { dealId } = req.params;
@@ -1059,6 +1074,9 @@ const updateBoardingStatus = async (req, res) => {
   }
 };
 
+/**
+ * getRideDeals - unchanged
+ */
 const getRideDeals = async (req, res) => {
   const { rideId } = req.params;
   try {
@@ -1111,6 +1129,9 @@ const getRideDeals = async (req, res) => {
   }
 };
 
+/**
+ * notifyDealMessage - unchanged
+ */
 const notifyDealMessage = async (req, res) => {
   const { dealId } = req.params;
   const uid = req.user.uid;
@@ -1142,6 +1163,9 @@ const notifyDealMessage = async (req, res) => {
   }
 };
 
+/**
+ * getCaptainProfile - unchanged
+ */
 const getCaptainProfile = async (req, res) => {
   const captainId = req.params.captainId || req.query.captainId;
   if (!captainId) {
