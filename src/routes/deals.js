@@ -10,6 +10,7 @@ const {
   getDeal,
   rateDeal,
   getMyBookings,
+  getMyDeals, // ✅ NEW - Captain's all deals
   getRideDeals,
   getConfirmedPassengers,
   updateBoardingStatus,
@@ -18,6 +19,7 @@ const {
 
 router.post('/', verifyToken, createDeal);
 router.get('/my-bookings', verifyToken, getMyBookings);
+router.get('/my-deals', verifyToken, getMyDeals); // ✅ NEW ROUTE
 router.get('/ride/:rideId/confirmed', verifyToken, getConfirmedPassengers);
 router.get('/ride/:rideId', verifyToken, getRideDeals);
 router.get('/:dealId', verifyToken, getDeal);
