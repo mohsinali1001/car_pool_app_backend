@@ -22,6 +22,9 @@ const RIDE_GRACE_PERIOD_MS = 20 * 60 * 1000;
 const COMPLETED_DEAL_RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
 const TERMINAL_DEAL_STATUSES = [DEAL_STATUS.COMPLETED, DEAL_STATUS.CANCELLED];
 
+// ✅ NEW: 24 hours retention for auto-archive and delete
+const DEAL_ARCHIVE_RETENTION_MS = 24 * 60 * 60 * 1000;
+
 function isPastIso(value, now = new Date()) {
   const dt = new Date(value || '');
   return !Number.isNaN(dt.getTime()) && dt < now;
@@ -214,7 +217,56 @@ async function cleanupExpiredCustomerRequests() {
 }
 
 /**
- * NEW: cleanupOldCompletedDeals
+ * NEW: autoArchiveConfirmedDeals
+ * Auto-archives confirmed deals that are older than 24 hours.
+ * Changes status from 'confirmed' to 'completed' automatically.
+ */
+async function autoArchiveConfirmedDeals() {
+  const now = new Date();
+  const cutoff = new Date(now.getTime() - DEAL_ARCHIVE_RETENTION_MS);
+
+  try {
+    const snapshot = await db
+      .collection('deals')
+      .where('status', '==', DEAL_STATUS.CONFIRMED)
+      .where('confirmedAt', '<=', cutoff.toISOString())
+      .limit(100)
+      .get();
+
+    if (snapshot.empty) {
+      console.log('✅ No confirmed deals to archive (older than 24h)');
+      return;
+    }
+
+    const batch = db.batch();
+    let count = 0;
+
+    for (const doc of snapshot.docs) {
+      const data = doc.data() || {};
+      // Also check if there's a confirmedAt field, if not use updatedAt
+      const refTime = data.confirmedAt || data.updatedAt || data.createdAt;
+      if (!isOlderThanIso(refTime, DEAL_ARCHIVE_RETENTION_MS, now)) continue;
+
+      batch.update(doc.ref, {
+        status: DEAL_STATUS.COMPLETED,
+        completedAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+        autoArchived: true,
+      });
+      count++;
+    }
+
+    if (count > 0) {
+      await batch.commit();
+      console.log(`✅ Auto-archived ${count} confirmed deals (older than 24h)`);
+    }
+  } catch (err) {
+    console.error('❌ autoArchiveConfirmedDeals error:', err);
+  }
+}
+
+/**
+ * cleanupOldCompletedDeals
  * Deletes "deals" (bookings) permanently once they've been in a terminal
  * state (completed or cancelled) for more than 3 days. This is the
  * background counterpart to the 3-day filter already applied in
@@ -249,11 +301,15 @@ async function cleanupOldCompletedDeals() {
     }
   }
 
-  if (writes > 0) await batch.commit();
+  if (writes > 0) {
+    await batch.commit();
+    console.log(`✅ Deleted ${writes} old completed/cancelled deals (older than 3 days)`);
+  }
 }
 
 module.exports = {
   cleanupExpiredRides,
   cleanupExpiredCustomerRequests,
-  cleanupOldCompletedDeals,
+  autoArchiveConfirmedDeals,     // ✅ ADDED - exports this function
+  cleanupOldCompletedDeals,      // ✅ ADDED - exports this function
 };
