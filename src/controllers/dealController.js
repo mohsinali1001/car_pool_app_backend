@@ -3,7 +3,7 @@ const { deductBalance, addBalance } = require('../utils/walletHelper');
 const { pushToUser } = require('../utils/notificationHelper');
 const { RIDE_STATUS, DEAL_STATUS, ACTIVE_DEAL_STATUSES } = require('../constants/statuses');
 const { labelFromLocation } = require('../utils/locationLabelHelper');
-const { maybeCleanupExpiredRides } = require('../utils/throttledCleanup');
+const { maybeCleanupExpiredRides, maybeAutoArchiveConfirmedDeals, maybeCleanupOldCompletedDeals } = require('../utils/throttledCleanup');
 const { seatUpdateFromRide } = require('../utils/seatHelper');
 const {
   sanitizeString,
@@ -761,6 +761,9 @@ const completeDeal = async (req, res) => {
 const getDeal = async (req, res) => {
   try {
     await maybeCleanupExpiredRides();
+    await maybeAutoArchiveConfirmedDeals();
+    await maybeCleanupOldCompletedDeals();
+    
     const doc = await db.collection('deals').doc(req.params.dealId).get();
     if (!doc.exists) {
       return res.status(404).json({ success: false, error: 'Deal not found', code: 'DEAL_NOT_FOUND' });
@@ -903,6 +906,9 @@ const rateDeal = async (req, res) => {
 const getMyBookings = async (req, res) => {
   try {
     await maybeCleanupExpiredRides();
+    await maybeAutoArchiveConfirmedDeals();
+    await maybeCleanupOldCompletedDeals();
+    
     const snap = await db
       .collection('deals')
       .where('customerId', '==', req.user.uid)
@@ -932,6 +938,79 @@ const getMyBookings = async (req, res) => {
     return res.json({ success: true, bookings });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message, code: 'GET_MY_BOOKINGS_ERROR' });
+  }
+};
+
+/**
+ * ✅ NEW: getMyDeals - Get all deals where captain is the captain
+ * This is used for the global Requests tab in captain app
+ */
+const getMyDeals = async (req, res) => {
+  try {
+    await maybeCleanupExpiredRides();
+    await maybeAutoArchiveConfirmedDeals();
+    await maybeCleanupOldCompletedDeals();
+    
+    const captainId = req.user.uid;
+    
+    const snap = await db
+      .collection('deals')
+      .where('captainId', '==', captainId)
+      .orderBy('createdAt', 'desc')
+      .get();
+
+    const deals = [];
+    for (const doc of snap.docs) {
+      let deal = { id: doc.id, ...doc.data() };
+      const status = (deal.status || '').toString().toLowerCase();
+
+      // Keep all deals except completed/cancelled older than 3 days
+      if ([DEAL_STATUS.COMPLETED, DEAL_STATUS.CANCELLED].includes(status)) {
+        const terminalAtRaw = deal.completedAt || deal.updatedAt || deal.createdAt || null;
+        const terminalAt = terminalAtRaw ? new Date(terminalAtRaw).getTime() : NaN;
+        if (Number.isFinite(terminalAt) && Date.now() - terminalAt > BOOKING_RETENTION_MS) {
+          continue;
+        }
+      }
+
+      // Populate ride details
+      deal = await populateRide(deal);
+      
+      // Get customer info if available
+      if (deal.customerId) {
+        const customer = await db.collection('users').doc(deal.customerId).get();
+        if (customer.exists) {
+          const customerData = customer.data();
+          deal.customer = {
+            name: customerData.name || 'Customer',
+            phone: customerData.phone || '',
+            rating: customerData.rating || 0,
+          };
+          deal.customerName = customerData.name || 'Customer';
+          deal.customerPhone = customerData.phone || '';
+        }
+      }
+
+      // Format for display
+      deals.push({
+        ...deal,
+        tabStatus: normalizeBooking(deal).tabStatus,
+        displayStatus: status,
+      });
+    }
+
+    return res.json({
+      success: true,
+      deals,
+      count: deals.length,
+    });
+  } catch (err) {
+    console.error('Error in getMyDeals:', err);
+    return res.status(500).json({
+      success: false,
+      error: err.message,
+      code: 'GET_MY_DEALS_ERROR',
+    });
   }
 };
 
@@ -1075,12 +1154,15 @@ const updateBoardingStatus = async (req, res) => {
 };
 
 /**
- * getRideDeals - unchanged
+ * getRideDeals - unchanged but added cleanup calls
  */
 const getRideDeals = async (req, res) => {
   const { rideId } = req.params;
   try {
     await maybeCleanupExpiredRides();
+    await maybeAutoArchiveConfirmedDeals();
+    await maybeCleanupOldCompletedDeals();
+    
     const rideDoc = await db.collection('rides').doc(rideId).get();
     if (!rideDoc.exists) {
       return res.status(404).json({ success: false, error: 'Ride not found', code: 'RIDE_NOT_FOUND' });
@@ -1232,6 +1314,7 @@ module.exports = {
   getDeal,
   rateDeal,
   getMyBookings,
+  getMyDeals, // ✅ NEW - Captain's all deals
   getRideDeals,
   getConfirmedPassengers,
   updateBoardingStatus,
