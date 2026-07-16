@@ -3,7 +3,7 @@ const { deductBalance, addBalance } = require('../utils/walletHelper');
 const { pushToUser } = require('../utils/notificationHelper');
 const { RIDE_STATUS, DEAL_STATUS, ACTIVE_DEAL_STATUSES } = require('../constants/statuses');
 const { labelFromLocation } = require('../utils/locationLabelHelper');
-// Cleanup helpers are no longer used in requests – they run as a separate scheduled job
+// Cleanup helpers are now called from a separate scheduled job only
 // const { maybeCleanupExpiredRides, maybeAutoArchiveConfirmedDeals, maybeCleanupOldCompletedDeals } = require('../utils/throttledCleanup');
 const { seatUpdateFromRide } = require('../utils/seatHelper');
 const {
@@ -17,6 +17,7 @@ const { CAPTAIN_STARTER_BALANCE } = require('../utils/walletHelper');
 const PLATFORM_FEE_PERCENT = 0.05;
 const BOOKING_RETENTION_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
 
+// ---------- Helpers ----------
 function generalPickupArea(address) {
   if (!address || typeof address !== 'string') return 'Along route';
   const parts = address.split(',').map((p) => p.trim()).filter(Boolean);
@@ -88,10 +89,12 @@ async function maybeCompleteRide(rideId) {
 
 /**
  * Populate a single deal with its ride data.
- * This function is used inside Promise.all for parallel fetching.
+ * Used inside Promise.all for parallel fetching.
  */
 async function populateRide(deal) {
   if (!deal.rideId) return deal;
+  // If ride data already exists (denormalized), skip fetch
+  if (deal.ride) return deal;
   const rideDoc = await db.collection('rides').doc(deal.rideId).get();
   if (!rideDoc.exists) return deal;
   const ride = rideDoc.data();
@@ -185,11 +188,6 @@ async function getCaptainReviewSummary(captainId, limit = 5) {
 }
 
 // ---------- REUSABLE CONFIRM TRANSACTION ----------
-/**
- * Internal function to execute the confirm transaction.
- * Can be called by confirmDeal (captain/customer manual) or auto-confirm.
- * Throws error if insufficient balance, ride full, etc.
- */
 async function _executeConfirmTransaction(dealId, actorUid, options = {}) {
   const { skipOwnershipCheck = false } = options;
 
@@ -201,16 +199,12 @@ async function _executeConfirmTransaction(dealId, actorUid, options = {}) {
   const isCaptain = preDeal.captainId === actorUid;
   const isCustomer = preDeal.customerId === actorUid;
 
-  // Allow actor if they are captain or customer (or skip check for auto)
   if (!skipOwnershipCheck && !isCaptain && !isCustomer) {
     throw Object.assign(new Error('Not your deal'), { code: 'UNAUTHORIZED' });
   }
-
-  // For manual confirm: if customer (not captain) confirms, only if lastCounterBy === 'captain'
   if (!skipOwnershipCheck && isCustomer && preDeal.lastCounterBy !== 'captain') {
     throw Object.assign(new Error('Only captain can confirm this deal'), { code: 'UNAUTHORIZED' });
   }
-
   if (preDeal.status !== DEAL_STATUS.PENDING) {
     throw Object.assign(new Error('Deal already processed'), { code: 'INVALID_STATE' });
   }
@@ -305,8 +299,6 @@ async function _executeConfirmTransaction(dealId, actorUid, options = {}) {
   });
 
   await syncRideStatusFromDeals(preDeal.rideId);
-
-  // Notify the other party
   const notifyRecipient = (isCustomer || skipOwnershipCheck) ? captainId : customerId;
   await pushToUser(notifyRecipient, {
     title: 'Booking confirmed',
@@ -317,10 +309,11 @@ async function _executeConfirmTransaction(dealId, actorUid, options = {}) {
 
   return { commission, newBalance };
 }
-// ------------------------------------------------
+
+// ---------- CONTROLLER ENDPOINTS ----------
 
 /**
- * ✅ OPTIMIZED: createDeal (unchanged logic, only cleanup removed)
+ * createDeal – stores ride snapshot (denormalized) and auto-confirms if fare matches
  */
 const createDeal = async (req, res) => {
   const uid = req.user.uid;
@@ -367,7 +360,6 @@ const createDeal = async (req, res) => {
     if (!rideDoc.exists) {
       return res.status(404).json({ success: false, error: 'Ride not found', code: 'RIDE_NOT_FOUND' });
     }
-    
     const rideData = rideDoc.data();
     const isSelfBooking = rideData.captainId === uid;
     if (isSelfBooking) {
@@ -397,9 +389,31 @@ const createDeal = async (req, res) => {
     const captainUserDoc = await db.collection('users').doc(captainId).get();
     const captainPhone = captainUserDoc.exists ? (captainUserDoc.data().phone || '') : '';
 
-    // Determine if fare matches (no negotiation)
     const suggestedFare = Number(rideData.suggestedFare || 0);
     const isNegotiated = parseFloat(agreedFare) !== suggestedFare;
+
+    // Build denormalized ride snapshot
+    const rideSnapshot = {
+      id: rideId,
+      startLocation: rideData.startLocation,
+      endLocation: rideData.endLocation,
+      exactLocation: rideData.exactLocation,
+      exactDropLocation: rideData.exactDropLocation,
+      startLat: rideData.startLat,
+      startLng: rideData.startLng,
+      endLat: rideData.endLat,
+      endLng: rideData.endLng,
+      departureTime: rideData.departureTime,
+      captainName: rideData.captainName,
+      captainId: rideData.captainId,
+      vehicleInfo: rideData.vehicleInfo,
+      vehiclePhotoUrl: rideData.vehiclePhotoUrl,
+      suggestedFare: rideData.suggestedFare,
+      status: rideData.status,
+      availableSeats: rideData.availableSeats,
+      totalSeats: rideData.totalSeats,
+      full: rideData.full === true || (rideData.availableSeats || 0) <= 0,
+    };
 
     const dealData = await db.runTransaction(async (t) => {
       const ride = await t.get(rideRef);
@@ -425,6 +439,7 @@ const createDeal = async (req, res) => {
       const data = {
         id: dealRef.id,
         rideId,
+        ride: rideSnapshot, // denormalized
         captainId: rideData.captainId,
         customerId: uid,
         customerName: userDoc.data().name || 'Guest',
@@ -433,7 +448,7 @@ const createDeal = async (req, res) => {
         phoneRevealed: false,
         agreedFare: parseFloat(agreedFare),
         platformFee,
-        status: DEAL_STATUS.PENDING, // will be updated to CONFIRMED if auto-confirm
+        status: DEAL_STATUS.PENDING,
         customerMessage: sanitizedMessage,
         passengerPickupLat: pickupLat,
         passengerPickupLng: pickupLng,
@@ -453,7 +468,7 @@ const createDeal = async (req, res) => {
       return data;
     });
 
-    // ✅ AUTO-CONFIRM if fare matches
+    // Auto-confirm if fare matches
     if (!isNegotiated) {
       try {
         await _executeConfirmTransaction(dealRef.id, uid, { skipOwnershipCheck: true });
@@ -482,9 +497,6 @@ const createDeal = async (req, res) => {
   }
 };
 
-/**
- * confirmDeal – uses reusable transaction, unchanged
- */
 const confirmDeal = async (req, res) => {
   const { dealId } = req.params;
   const uid = req.user.uid;
@@ -498,7 +510,7 @@ const confirmDeal = async (req, res) => {
       newBalance: result.newBalance,
     });
   } catch (err) {
-    const status = err.statusCode || (err.code === 'RIDE_FULL' || err.code === 'INSUFFICIENT_BALANCE' ? 400 : 400);
+    const status = err.statusCode || 400;
     return res.status(status).json({
       success: false,
       error: err.message,
@@ -509,9 +521,6 @@ const confirmDeal = async (req, res) => {
   }
 };
 
-/**
- * cancelDeal – unchanged
- */
 const cancelDeal = async (req, res) => {
   const { dealId } = req.params;
   const uid = req.user.uid;
@@ -574,9 +583,6 @@ const cancelDeal = async (req, res) => {
   }
 };
 
-/**
- * counterDeal – unchanged
- */
 const counterDeal = async (req, res) => {
   const { dealId } = req.params;
   const uid = req.user.uid;
@@ -643,9 +649,6 @@ const counterDeal = async (req, res) => {
   }
 };
 
-/**
- * startDeal – unchanged
- */
 const startDeal = async (req, res) => {
   const { dealId } = req.params;
   const uid = req.user.uid;
@@ -665,7 +668,6 @@ const startDeal = async (req, res) => {
     }
 
     const startedAt = new Date().toISOString();
-
     await dealRef.update({
       status: DEAL_STATUS.STARTED,
       startedAt,
@@ -690,9 +692,6 @@ const startDeal = async (req, res) => {
   }
 };
 
-/**
- * completeDeal – unchanged
- */
 const completeDeal = async (req, res) => {
   const { dealId } = req.params;
   const uid = req.user.uid;
@@ -753,9 +752,6 @@ const completeDeal = async (req, res) => {
   }
 };
 
-/**
- * getDeal – unchanged
- */
 const getDeal = async (req, res) => {
   try {
     const doc = await db.collection('deals').doc(req.params.dealId).get();
@@ -805,9 +801,6 @@ const getDeal = async (req, res) => {
   }
 };
 
-/**
- * rateDeal – unchanged
- */
 const rateDeal = async (req, res) => {
   const { dealId } = req.params;
   const uid = req.user.uid;
@@ -895,18 +888,43 @@ const rateDeal = async (req, res) => {
 };
 
 /**
- * ✅ OPTIMIZED: getMyBookings – parallel ride fetch, no cleanup blocking
+ * ✅ getMyBookings – with pagination, parallel ride fetch, and no cleanup
  */
 const getMyBookings = async (req, res) => {
   try {
-    const snap = await db
-      .collection('deals')
+    const limit = Math.min(parseInt(req.query.limit) || 20, 50);
+    let query = db.collection('deals')
       .where('customerId', '==', req.user.uid)
       .orderBy('createdAt', 'desc')
-      .get();
+      .limit(limit);
 
+    if (req.query.startAfter) {
+      // startAfter expects a document snapshot, but we can use a timestamp value
+      // Since we order by createdAt, we can use the timestamp string directly
+      // But Firestore requires a proper cursor, so we need to fetch the last doc.
+      // For simplicity, we'll use a timestamp as a string cursor.
+      // Better: store the last document ID and use it.
+      // Here we use the timestamp as a string cursor.
+      const cursor = req.query.startAfter; // ISO string
+      // We need to create a query with startAfter using a document snapshot.
+      // Since we only have the timestamp, we'll use a workaround:
+      // Fetch one doc with that timestamp, then use it as startAfter.
+      const tempSnap = await db.collection('deals')
+        .where('customerId', '==', req.user.uid)
+        .orderBy('createdAt', 'desc')
+        .limit(1)
+        .startAfter(cursor)
+        .get();
+      if (!tempSnap.empty) {
+        query = query.startAfter(tempSnap.docs[0]);
+      } else {
+        // If no such doc, treat as end
+        query = query.limit(0);
+      }
+    }
+
+    const snap = await query.get();
     const now = Date.now();
-    // First, build array of deals (excluding old terminal ones)
     const deals = [];
     for (const doc of snap.docs) {
       let deal = { id: doc.id, ...doc.data() };
@@ -922,10 +940,8 @@ const getMyBookings = async (req, res) => {
       deals.push(deal);
     }
 
-    // 🚀 Parallel fetch all rides
     const populatedDeals = await Promise.all(deals.map(deal => populateRide(deal)));
 
-    // Mask captain phone and normalize
     const bookings = populatedDeals.map(deal => {
       const phoneRevealed = deal.phoneRevealed === true;
       const fullCaptainPhone = deal.captainPhone || '';
@@ -933,19 +949,26 @@ const getMyBookings = async (req, res) => {
       return normalizeBooking(deal);
     });
 
-    return res.json({ success: true, bookings });
+    const hasMore = snap.docs.length === limit && bookings.length > 0;
+    const nextCursor = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1].data().createdAt : null;
+
+    return res.json({
+      success: true,
+      bookings,
+      hasMore,
+      nextCursor,
+    });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message, code: 'GET_MY_BOOKINGS_ERROR' });
   }
 };
 
 /**
- * ✅ OPTIMIZED: getMyDeals – parallel ride fetch, no cleanup blocking
+ * ✅ getMyDeals – parallel ride fetch, no pagination (can be added later)
  */
 const getMyDeals = async (req, res) => {
   try {
     const captainId = req.user.uid;
-    
     const snap = await db
       .collection('deals')
       .where('captainId', '==', captainId)
@@ -968,12 +991,8 @@ const getMyDeals = async (req, res) => {
       deals.push(deal);
     }
 
-    // 🚀 Parallel fetch rides and customer info
     const populatedDeals = await Promise.all(deals.map(async (deal) => {
-      // Populate ride
       deal = await populateRide(deal);
-      
-      // Get customer info if available
       if (deal.customerId) {
         const customer = await db.collection('users').doc(deal.customerId).get();
         if (customer.exists) {
@@ -990,7 +1009,6 @@ const getMyDeals = async (req, res) => {
       return deal;
     }));
 
-    // Format for display
     const result = populatedDeals.map(deal => ({
       ...deal,
       tabStatus: normalizeBooking(deal).tabStatus,
@@ -1012,9 +1030,6 @@ const getMyDeals = async (req, res) => {
   }
 };
 
-/**
- * getConfirmedPassengers – unchanged (it already fetches only one ride)
- */
 const getConfirmedPassengers = async (req, res) => {
   const { rideId } = req.params;
   const uid = req.user.uid;
@@ -1095,9 +1110,6 @@ const getConfirmedPassengers = async (req, res) => {
   }
 };
 
-/**
- * updateBoardingStatus – unchanged
- */
 const updateBoardingStatus = async (req, res) => {
   const { dealId } = req.params;
   const uid = req.user.uid;
@@ -1151,9 +1163,6 @@ const updateBoardingStatus = async (req, res) => {
   }
 };
 
-/**
- * ✅ OPTIMIZED: getRideDeals – parallel customer fetch, no cleanup
- */
 const getRideDeals = async (req, res) => {
   const { rideId } = req.params;
   try {
@@ -1171,10 +1180,8 @@ const getRideDeals = async (req, res) => {
       .orderBy('createdAt', 'desc')
       .get();
 
-    // Build list of deals
     const deals = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
-    // 🚀 Parallel: mask phone and fetch customer info for each deal
     const populatedDeals = await Promise.all(deals.map(async (deal) => {
       const phoneRevealed = deal.phoneRevealed === true;
       const fullCaptainPhone = deal.captainPhone || '';
@@ -1208,9 +1215,6 @@ const getRideDeals = async (req, res) => {
   }
 };
 
-/**
- * notifyDealMessage – unchanged
- */
 const notifyDealMessage = async (req, res) => {
   const { dealId } = req.params;
   const uid = req.user.uid;
@@ -1242,9 +1246,6 @@ const notifyDealMessage = async (req, res) => {
   }
 };
 
-/**
- * getCaptainProfile – unchanged
- */
 const getCaptainProfile = async (req, res) => {
   const captainId = req.params.captainId || req.query.captainId;
   if (!captainId) {
