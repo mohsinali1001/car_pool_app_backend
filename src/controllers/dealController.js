@@ -3,7 +3,8 @@ const { deductBalance, addBalance } = require('../utils/walletHelper');
 const { pushToUser } = require('../utils/notificationHelper');
 const { RIDE_STATUS, DEAL_STATUS, ACTIVE_DEAL_STATUSES } = require('../constants/statuses');
 const { labelFromLocation } = require('../utils/locationLabelHelper');
-const { maybeCleanupExpiredRides, maybeAutoArchiveConfirmedDeals, maybeCleanupOldCompletedDeals } = require('../utils/throttledCleanup');
+// Cleanup helpers are no longer used in requests – they run as a separate scheduled job
+// const { maybeCleanupExpiredRides, maybeAutoArchiveConfirmedDeals, maybeCleanupOldCompletedDeals } = require('../utils/throttledCleanup');
 const { seatUpdateFromRide } = require('../utils/seatHelper');
 const {
   sanitizeString,
@@ -85,6 +86,10 @@ async function maybeCompleteRide(rideId) {
   });
 }
 
+/**
+ * Populate a single deal with its ride data.
+ * This function is used inside Promise.all for parallel fetching.
+ */
 async function populateRide(deal) {
   if (!deal.rideId) return deal;
   const rideDoc = await db.collection('rides').doc(deal.rideId).get();
@@ -315,8 +320,7 @@ async function _executeConfirmTransaction(dealId, actorUid, options = {}) {
 // ------------------------------------------------
 
 /**
- * ✅ FIXED: createDeal - Allow captain to book own ride (testing mode)
- * ✅ Auto-confirm if agreedFare === suggestedFare
+ * ✅ OPTIMIZED: createDeal (unchanged logic, only cleanup removed)
  */
 const createDeal = async (req, res) => {
   const uid = req.user.uid;
@@ -449,27 +453,22 @@ const createDeal = async (req, res) => {
       return data;
     });
 
-    // ✅ AUTO-CONFIRM if fare matches and NOT a self-booking OR even if self-booking, we allow
-    // (For self-booking, we still auto-confirm if fare matches)
+    // ✅ AUTO-CONFIRM if fare matches
     if (!isNegotiated) {
       try {
         await _executeConfirmTransaction(dealRef.id, uid, { skipOwnershipCheck: true });
         console.log(`✅ Auto-confirmed deal ${dealRef.id} (fare matched)`);
       } catch (err) {
-        // If insufficient balance or other error, keep deal pending.
         console.warn(`⚠️ Auto-confirm failed for deal ${dealRef.id}: ${err.message}`);
-        // We might want to notify captain to add balance
         await pushToUser(captainId, {
           title: 'Booking received but not confirmed',
           body: 'A passenger booked your ride, but your wallet balance is insufficient to confirm. Please add balance.',
           type: 'wallet_insufficient',
           data: { dealId: dealRef.id, rideId },
         });
-        // Keep deal as PENDING
       }
     }
 
-    // Always notify captain about new booking (even if auto-confirmed)
     await pushToUser(captainId, {
       title: isNegotiated ? 'New Booking Request!' : 'New Booking Confirmed!',
       body: `${dealData.customerName} wants to ride with you.${isNegotiated ? ' Tap to respond.' : ' It is confirmed.'}`,
@@ -484,8 +483,7 @@ const createDeal = async (req, res) => {
 };
 
 /**
- * ✅ FIXED: confirmDeal - Captain or customer can confirm (with proper checks)
- * Uses reusable _executeConfirmTransaction
+ * confirmDeal – uses reusable transaction, unchanged
  */
 const confirmDeal = async (req, res) => {
   const { dealId } = req.params;
@@ -512,7 +510,7 @@ const confirmDeal = async (req, res) => {
 };
 
 /**
- * cancelDeal - unchanged except maybe small fix
+ * cancelDeal – unchanged
  */
 const cancelDeal = async (req, res) => {
   const { dealId } = req.params;
@@ -577,7 +575,7 @@ const cancelDeal = async (req, res) => {
 };
 
 /**
- * counterDeal - unchanged
+ * counterDeal – unchanged
  */
 const counterDeal = async (req, res) => {
   const { dealId } = req.params;
@@ -611,7 +609,7 @@ const counterDeal = async (req, res) => {
       lastCounterBy: isCaptain ? 'captain' : 'customer',
       lastCounterAt: now,
       updatedAt: now,
-      isNegotiated: true, // counter always means negotiated
+      isNegotiated: true,
     };
     if (message != null && String(message).trim().length > 0) {
       if (exceedsMaxLength(message, MAX_CUSTOMER_MESSAGE)) {
@@ -646,7 +644,7 @@ const counterDeal = async (req, res) => {
 };
 
 /**
- * startDeal - unchanged
+ * startDeal – unchanged
  */
 const startDeal = async (req, res) => {
   const { dealId } = req.params;
@@ -693,7 +691,7 @@ const startDeal = async (req, res) => {
 };
 
 /**
- * completeDeal - unchanged
+ * completeDeal – unchanged
  */
 const completeDeal = async (req, res) => {
   const { dealId } = req.params;
@@ -756,14 +754,10 @@ const completeDeal = async (req, res) => {
 };
 
 /**
- * getDeal - unchanged
+ * getDeal – unchanged
  */
 const getDeal = async (req, res) => {
   try {
-    await maybeCleanupExpiredRides();
-    await maybeAutoArchiveConfirmedDeals();
-    await maybeCleanupOldCompletedDeals();
-    
     const doc = await db.collection('deals').doc(req.params.dealId).get();
     if (!doc.exists) {
       return res.status(404).json({ success: false, error: 'Deal not found', code: 'DEAL_NOT_FOUND' });
@@ -812,7 +806,7 @@ const getDeal = async (req, res) => {
 };
 
 /**
- * rateDeal - unchanged
+ * rateDeal – unchanged
  */
 const rateDeal = async (req, res) => {
   const { dealId } = req.params;
@@ -901,14 +895,10 @@ const rateDeal = async (req, res) => {
 };
 
 /**
- * getMyBookings - unchanged (3-day filter)
+ * ✅ OPTIMIZED: getMyBookings – parallel ride fetch, no cleanup blocking
  */
 const getMyBookings = async (req, res) => {
   try {
-    await maybeCleanupExpiredRides();
-    await maybeAutoArchiveConfirmedDeals();
-    await maybeCleanupOldCompletedDeals();
-    
     const snap = await db
       .collection('deals')
       .where('customerId', '==', req.user.uid)
@@ -916,7 +906,8 @@ const getMyBookings = async (req, res) => {
       .get();
 
     const now = Date.now();
-    const bookings = [];
+    // First, build array of deals (excluding old terminal ones)
+    const deals = [];
     for (const doc of snap.docs) {
       let deal = { id: doc.id, ...doc.data() };
       const status = (deal.status || '').toString().toLowerCase();
@@ -928,13 +919,20 @@ const getMyBookings = async (req, res) => {
           continue;
         }
       }
+      deals.push(deal);
+    }
 
+    // 🚀 Parallel fetch all rides
+    const populatedDeals = await Promise.all(deals.map(deal => populateRide(deal)));
+
+    // Mask captain phone and normalize
+    const bookings = populatedDeals.map(deal => {
       const phoneRevealed = deal.phoneRevealed === true;
       const fullCaptainPhone = deal.captainPhone || '';
       deal.captainPhone = phoneRevealed ? fullCaptainPhone : maskCaptainPhone(fullCaptainPhone);
-      deal = await populateRide(deal);
-      bookings.push(normalizeBooking(deal));
-    }
+      return normalizeBooking(deal);
+    });
+
     return res.json({ success: true, bookings });
   } catch (err) {
     return res.status(500).json({ success: false, error: err.message, code: 'GET_MY_BOOKINGS_ERROR' });
@@ -942,15 +940,10 @@ const getMyBookings = async (req, res) => {
 };
 
 /**
- * ✅ NEW: getMyDeals - Get all deals where captain is the captain
- * This is used for the global Requests tab in captain app
+ * ✅ OPTIMIZED: getMyDeals – parallel ride fetch, no cleanup blocking
  */
 const getMyDeals = async (req, res) => {
   try {
-    await maybeCleanupExpiredRides();
-    await maybeAutoArchiveConfirmedDeals();
-    await maybeCleanupOldCompletedDeals();
-    
     const captainId = req.user.uid;
     
     const snap = await db
@@ -959,12 +952,12 @@ const getMyDeals = async (req, res) => {
       .orderBy('createdAt', 'desc')
       .get();
 
+    const now = Date.now();
     const deals = [];
     for (const doc of snap.docs) {
       let deal = { id: doc.id, ...doc.data() };
       const status = (deal.status || '').toString().toLowerCase();
 
-      // Keep all deals except completed/cancelled older than 3 days
       if ([DEAL_STATUS.COMPLETED, DEAL_STATUS.CANCELLED].includes(status)) {
         const terminalAtRaw = deal.completedAt || deal.updatedAt || deal.createdAt || null;
         const terminalAt = terminalAtRaw ? new Date(terminalAtRaw).getTime() : NaN;
@@ -972,8 +965,12 @@ const getMyDeals = async (req, res) => {
           continue;
         }
       }
+      deals.push(deal);
+    }
 
-      // Populate ride details
+    // 🚀 Parallel fetch rides and customer info
+    const populatedDeals = await Promise.all(deals.map(async (deal) => {
+      // Populate ride
       deal = await populateRide(deal);
       
       // Get customer info if available
@@ -990,19 +987,20 @@ const getMyDeals = async (req, res) => {
           deal.customerPhone = customerData.phone || '';
         }
       }
+      return deal;
+    }));
 
-      // Format for display
-      deals.push({
-        ...deal,
-        tabStatus: normalizeBooking(deal).tabStatus,
-        displayStatus: status,
-      });
-    }
+    // Format for display
+    const result = populatedDeals.map(deal => ({
+      ...deal,
+      tabStatus: normalizeBooking(deal).tabStatus,
+      displayStatus: deal.status,
+    }));
 
     return res.json({
       success: true,
-      deals,
-      count: deals.length,
+      deals: result,
+      count: result.length,
     });
   } catch (err) {
     console.error('Error in getMyDeals:', err);
@@ -1015,7 +1013,7 @@ const getMyDeals = async (req, res) => {
 };
 
 /**
- * getConfirmedPassengers - unchanged
+ * getConfirmedPassengers – unchanged (it already fetches only one ride)
  */
 const getConfirmedPassengers = async (req, res) => {
   const { rideId } = req.params;
@@ -1098,7 +1096,7 @@ const getConfirmedPassengers = async (req, res) => {
 };
 
 /**
- * updateBoardingStatus - unchanged
+ * updateBoardingStatus – unchanged
  */
 const updateBoardingStatus = async (req, res) => {
   const { dealId } = req.params;
@@ -1154,15 +1152,11 @@ const updateBoardingStatus = async (req, res) => {
 };
 
 /**
- * getRideDeals - unchanged but added cleanup calls
+ * ✅ OPTIMIZED: getRideDeals – parallel customer fetch, no cleanup
  */
 const getRideDeals = async (req, res) => {
   const { rideId } = req.params;
   try {
-    await maybeCleanupExpiredRides();
-    await maybeAutoArchiveConfirmedDeals();
-    await maybeCleanupOldCompletedDeals();
-    
     const rideDoc = await db.collection('rides').doc(rideId).get();
     if (!rideDoc.exists) {
       return res.status(404).json({ success: false, error: 'Ride not found', code: 'RIDE_NOT_FOUND' });
@@ -1177,9 +1171,11 @@ const getRideDeals = async (req, res) => {
       .orderBy('createdAt', 'desc')
       .get();
 
-    const deals = [];
-    for (const doc of snap.docs) {
-      const deal = { id: doc.id, ...doc.data() };
+    // Build list of deals
+    const deals = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+    // 🚀 Parallel: mask phone and fetch customer info for each deal
+    const populatedDeals = await Promise.all(deals.map(async (deal) => {
       const phoneRevealed = deal.phoneRevealed === true;
       const fullCaptainPhone = deal.captainPhone || '';
       deal.captainPhone = phoneRevealed ? fullCaptainPhone : maskCaptainPhone(fullCaptainPhone);
@@ -1195,11 +1191,12 @@ const getRideDeals = async (req, res) => {
           deal.customerPhone = customerPhone;
         }
       }
-      deals.push(deal);
-    }
+      return deal;
+    }));
+
     return res.json({
       success: true,
-      deals,
+      deals: populatedDeals,
       ride: {
         totalSeats: rideDoc.data().totalSeats,
         availableSeats: rideDoc.data().availableSeats,
@@ -1212,7 +1209,7 @@ const getRideDeals = async (req, res) => {
 };
 
 /**
- * notifyDealMessage - unchanged
+ * notifyDealMessage – unchanged
  */
 const notifyDealMessage = async (req, res) => {
   const { dealId } = req.params;
@@ -1246,7 +1243,7 @@ const notifyDealMessage = async (req, res) => {
 };
 
 /**
- * getCaptainProfile - unchanged
+ * getCaptainProfile – unchanged
  */
 const getCaptainProfile = async (req, res) => {
   const captainId = req.params.captainId || req.query.captainId;
@@ -1314,7 +1311,7 @@ module.exports = {
   getDeal,
   rateDeal,
   getMyBookings,
-  getMyDeals, // ✅ NEW - Captain's all deals
+  getMyDeals,
   getRideDeals,
   getConfirmedPassengers,
   updateBoardingStatus,
