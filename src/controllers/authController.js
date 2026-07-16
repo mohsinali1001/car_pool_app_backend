@@ -1,6 +1,7 @@
 const { db } = require('../config/firebase');
 const { CAPTAIN_STARTER_BALANCE } = require('../utils/walletHelper');
 
+// ✅ NEW: Added emergency contact fields
 const ALLOWED_USER_FIELDS = [
   'name',
   'phone',
@@ -16,6 +17,8 @@ const ALLOWED_USER_FIELDS = [
   'vehiclePhotoUrl',
   'captainVehicleType',
   'captainVerificationStatus',
+  'emergencyContactName',   // ✅ NEW
+  'emergencyContactPhone',  // ✅ NEW
 ];
 
 // Simple in-memory cache for profiles (5 seconds TTL)
@@ -114,6 +117,9 @@ const syncUser = async (req, res) => {
         city: body.city || null,
         vehiclePhotoUrl: body.vehiclePhotoUrl || null,
         captainVehicleType: body.captainVehicleType || null,
+        // ✅ NEW: Emergency Contact Fields
+        emergencyContactName: body.emergencyContactName || null,
+        emergencyContactPhone: body.emergencyContactPhone || null,
         rating: 0.0,
         totalRides: 0,
         fcmToken: null,
