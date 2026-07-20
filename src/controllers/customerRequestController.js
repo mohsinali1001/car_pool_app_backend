@@ -110,7 +110,7 @@ function formatRequestDateTime(value) {
     const minutesStr = minute === '00' ? '' : `:${minute}`;
     const timeStr = `${hour}${minutesStr} ${dayPeriod}`;
     
-    return `${day} ${month} ${year} time ${timeStr}`;
+    return `${day} ${month} ${year}, ${timeStr}`;
   } catch (e) {
     const day = date.getDate();
     const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -122,7 +122,7 @@ function formatRequestDateTime(value) {
     hours = hours % 12;
     hours = hours ? hours : 12;
     const minutesStr = minutes === 0 ? '' : `:${minutes.toString().padStart(2, '0')}`;
-    return `${day} ${month} ${year} time ${hours}${minutesStr} ${ampm}`;
+    return `${day} ${month} ${year}, ${hours}${minutesStr} ${ampm}`;
   }
 }
 
@@ -332,7 +332,9 @@ const createCustomerRequest = async (req, res) => {
 const getOpenCustomerRequests = async (req, res) => {
   const uid = req.user.uid;
   try {
+    // ✅ CLEANUP: Expired customer requests ko pehle clean karo
     await maybeCleanupExpiredCustomerRequests();
+    
     const captainDoc = await db.collection('users').doc(uid).get();
     if (!captainDoc.exists) {
       return res.status(404).json({ success: false, error: 'Captain not found', code: 'USER_NOT_FOUND' });
@@ -395,7 +397,9 @@ const getOpenCustomerRequests = async (req, res) => {
 
 const getMyCustomerRequests = async (req, res) => {
   try {
+    // ✅ CLEANUP: Expired customer requests ko pehle clean karo
     await maybeCleanupExpiredCustomerRequests();
+    
     const snap = await db
       .collection('customerRideRequests')
       .where('customerId', '==', req.user.uid)
