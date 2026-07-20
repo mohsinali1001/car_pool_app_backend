@@ -679,9 +679,10 @@ const getActiveRides = async (req, res) => {
       if (requesterDoc.exists) requesterGender = (requesterDoc.data().gender || '').toString().toLowerCase();
     }
 
-    // Captain rides stay visible for 20 minutes after departureTime passes
+    // Captain rides stay visible for 30 minutes after departureTime passes
     // (grace period) before the background cleanup removes/completes them.
-    const RIDE_GRACE_PERIOD_MS = 20 * 60 * 1000;
+    // CHANGED: 20 → 30 minutes
+    const RIDE_GRACE_PERIOD_MS = 30 * 60 * 1000;
     const now = new Date().toISOString();
     const nowMs = Date.now();
     const graceFloor = new Date(nowMs - RIDE_GRACE_PERIOD_MS).toISOString();
@@ -699,7 +700,7 @@ const getActiveRides = async (req, res) => {
     const snap = await query.limit(fetchLimit).get();
     let rides = snap.docs.map(d => serializeRide(d.id, d.data()));
     // Flag rides whose departure time has already passed but are still
-    // within the 20-minute grace window, so the frontend can show them
+    // within the 30-minute grace window, so the frontend can show them
     // as "ended" (e.g. in red) instead of hiding them outright.
     rides = rides.map((r) => ({
       ...r,
