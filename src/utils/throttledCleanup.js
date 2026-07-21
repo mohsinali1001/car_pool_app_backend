@@ -118,7 +118,8 @@ async function cleanupExpiredCustomerRequests() {
 async function autoArchiveConfirmedDeals() {
   try {
     console.log('🧹 [3/4] Archiving old confirmed deals...');
-    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const now = new Date();
+    const cutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
     
     const snap = await db.collection('deals')
       .where('status', '==', DEAL_STATUS.CONFIRMED)
@@ -130,10 +131,15 @@ async function autoArchiveConfirmedDeals() {
     const batch = db.batch();
     
     for (const doc of snap.docs) {
+      const archivedAt = now.toISOString();
       batch.update(doc.ref, {
         status: DEAL_STATUS.COMPLETED,
-        archivedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        // ✅ Set completedAt so the 24h retention filter in getMyBookings
+        // calculates the expiry from the correct completion time.
+        completedAt: archivedAt,
+        archivedAt,
+        autoArchived: true,
+        updatedAt: archivedAt,
       });
       count++;
       
@@ -156,13 +162,14 @@ async function autoArchiveConfirmedDeals() {
 }
 
 /**
- * Cleanup old completed/cancelled deals (older than 3 days)
+ * Cleanup old completed/cancelled deals (older than 24 hours)
  * Soft-delete: mark as archived
  */
 async function cleanupOldCompletedDeals() {
   try {
     console.log('🧹 [4/4] Cleaning old completed/cancelled deals...');
-    const cutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+    // ✅ Aligned to 24-hour retention to match BOOKING_RETENTION_MS in dealController
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     
     const snap = await db.collection('deals')
       .where('status', 'in', [DEAL_STATUS.COMPLETED, DEAL_STATUS.CANCELLED])

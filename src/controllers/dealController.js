@@ -15,7 +15,7 @@ const {
 const { CAPTAIN_STARTER_BALANCE } = require('../utils/walletHelper');
 
 const PLATFORM_FEE_PERCENT = 0.05;
-const BOOKING_RETENTION_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
+const BOOKING_RETENTION_MS = 24 * 60 * 60 * 1000; // 24 hours – completed bookings disappear after 1 day
 
 // ---------- Helpers ----------
 function generalPickupArea(address) {
@@ -888,59 +888,51 @@ const rateDeal = async (req, res) => {
 };
 
 /**
- * ✅ getMyBookings – with pagination, parallel ride fetch, and no cleanup
+ * ✅ getMyBookings – optimized: skips ride fetch for denormalized deals, clean cursor pagination
  */
 const getMyBookings = async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 20, 50);
+
+    // Build base query ordered by createdAt descending
     let query = db.collection('deals')
       .where('customerId', '==', req.user.uid)
       .orderBy('createdAt', 'desc')
       .limit(limit);
 
+    // ✅ FIXED: Use createdAt ISO string directly as cursor value.
+    // Firestore allows startAfter() with a raw field value when the query
+    // is ordered by that field — no second round-trip needed.
     if (req.query.startAfter) {
-      // startAfter expects a document snapshot, but we can use a timestamp value
-      // Since we order by createdAt, we can use the timestamp string directly
-      // But Firestore requires a proper cursor, so we need to fetch the last doc.
-      // For simplicity, we'll use a timestamp as a string cursor.
-      // Better: store the last document ID and use it.
-      // Here we use the timestamp as a string cursor.
-      const cursor = req.query.startAfter; // ISO string
-      // We need to create a query with startAfter using a document snapshot.
-      // Since we only have the timestamp, we'll use a workaround:
-      // Fetch one doc with that timestamp, then use it as startAfter.
-      const tempSnap = await db.collection('deals')
-        .where('customerId', '==', req.user.uid)
-        .orderBy('createdAt', 'desc')
-        .limit(1)
-        .startAfter(cursor)
-        .get();
-      if (!tempSnap.empty) {
-        query = query.startAfter(tempSnap.docs[0]);
-      } else {
-        // If no such doc, treat as end
-        query = query.limit(0);
-      }
+      query = query.startAfter(req.query.startAfter);
     }
 
     const snap = await query.get();
     const now = Date.now();
-    const deals = [];
+    const dealsToPopulate = [];
+
     for (const doc of snap.docs) {
-      let deal = { id: doc.id, ...doc.data() };
+      const deal = { id: doc.id, ...doc.data() };
       const status = (deal.status || '').toString().toLowerCase();
 
+      // ✅ Exclude terminal deals older than BOOKING_RETENTION_MS (24 hours)
       if ([DEAL_STATUS.COMPLETED, DEAL_STATUS.CANCELLED].includes(status)) {
+        // Prefer completedAt, then updatedAt, then createdAt
         const terminalAtRaw = deal.completedAt || deal.updatedAt || deal.createdAt || null;
         const terminalAt = terminalAtRaw ? new Date(terminalAtRaw).getTime() : NaN;
         if (Number.isFinite(terminalAt) && now - terminalAt > BOOKING_RETENTION_MS) {
-          continue;
+          continue; // Skip – older than retention window
         }
       }
-      deals.push(deal);
+      dealsToPopulate.push(deal);
     }
 
-    const populatedDeals = await Promise.all(deals.map(deal => populateRide(deal)));
+    // ✅ OPTIMIZED: Skip populateRide() for deals that already carry a denormalized
+    // ride snapshot (set at deal creation time). Only fetch from Firestore for
+    // legacy deals that lack the embedded snapshot.
+    const populatedDeals = await Promise.all(
+      dealsToPopulate.map(deal => (deal.ride ? Promise.resolve(deal) : populateRide(deal)))
+    );
 
     const bookings = populatedDeals.map(deal => {
       const phoneRevealed = deal.phoneRevealed === true;

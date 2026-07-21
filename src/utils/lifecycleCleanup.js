@@ -16,13 +16,13 @@ const ACCEPTED_REQUEST_RETENTION_MS = 10 * 60 * 1000;
 // after its departureTime has passed, before it gets auto-completed/deleted.
 const RIDE_GRACE_PERIOD_MS = 20 * 60 * 1000;
 
-// Retention: completed/cancelled deals (bookings) are kept for 3 days after
+// Retention: completed/cancelled deals (bookings) are kept for 24 hours after
 // they become terminal, then permanently deleted. This backs "My Bookings"
-// item #15 — completed bookings should disappear from the list after 3 days.
-const COMPLETED_DEAL_RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
+// Objective 3 — completed bookings should disappear from the list after 24 hours.
+const COMPLETED_DEAL_RETENTION_MS = 24 * 60 * 60 * 1000; // 24 hours
 const TERMINAL_DEAL_STATUSES = [DEAL_STATUS.COMPLETED, DEAL_STATUS.CANCELLED];
 
-// ✅ NEW: 24 hours retention for auto-archive and delete
+// ✅ 24 hours retention for auto-archive and delete
 const DEAL_ARCHIVE_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 function isPastIso(value, now = new Date()) {
@@ -247,10 +247,13 @@ async function autoArchiveConfirmedDeals() {
       const refTime = data.confirmedAt || data.updatedAt || data.createdAt;
       if (!isOlderThanIso(refTime, DEAL_ARCHIVE_RETENTION_MS, now)) continue;
 
+      const archivedAt = now.toISOString();
       batch.update(doc.ref, {
         status: DEAL_STATUS.COMPLETED,
-        completedAt: now.toISOString(),
-        updatedAt: now.toISOString(),
+        // ✅ Set completedAt so the 24h retention filter calculates expiry correctly
+        completedAt: archivedAt,
+        archivedAt,
+        updatedAt: archivedAt,
         autoArchived: true,
       });
       count++;

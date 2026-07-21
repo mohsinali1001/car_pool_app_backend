@@ -1,7 +1,7 @@
 const { db } = require('../config/firebase');
 const { CAPTAIN_STARTER_BALANCE } = require('../utils/walletHelper');
 
-// ✅ NEW: Added emergency contact fields
+// ✅ NEW: Added emergency contact fields and photoUrl
 const ALLOWED_USER_FIELDS = [
   'name',
   'phone',
@@ -15,6 +15,7 @@ const ALLOWED_USER_FIELDS = [
   'vehicleSeats',
   'city',
   'vehiclePhotoUrl',
+  'photoUrl', // ✅ NEW: Profile Image URL
   'captainVehicleType',
   'captainVerificationStatus',
   'emergencyContactName',   // ✅ NEW
@@ -116,6 +117,7 @@ const syncUser = async (req, res) => {
         vehicleSeats: body.vehicleSeats ? parseInt(body.vehicleSeats, 10) : null,
         city: body.city || null,
         vehiclePhotoUrl: body.vehiclePhotoUrl || null,
+        photoUrl: body.photoUrl || null, // ✅ NEW: Profile Image URL
         captainVehicleType: body.captainVehicleType || null,
         // ✅ NEW: Emergency Contact Fields
         emergencyContactName: body.emergencyContactName || null,
