@@ -12,13 +12,12 @@ const {
   MAX_LOCATION,
 } = require('../utils/inputSanitizer');
 
-// Helper function to parse numbers
+// ─── HELPERS ──────────────────────────────────────────────
 function parseNumber(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
 
-// Helper function to calculate distance in km using Haversine formula
 function distanceKm(aLat, aLng, bLat, bLng) {
   if ([aLat, aLng, bLat, bLng].some((v) => v == null)) return null;
   const toRad = (value) => (value * Math.PI) / 180;
@@ -321,7 +320,6 @@ function locationsOverlap(queryStart, queryEnd, rideStart, rideEnd) {
   return rs.includes(qs) && re.includes(qe);
 }
 
-// Levenshtein distance for fuzzy matching
 function levenshteinSimilarity(str1, str2) {
   const s1 = (str1 || '').toLowerCase().trim();
   const s2 = (str2 || '').toLowerCase().trim();
@@ -357,7 +355,6 @@ function levenshteinSimilarity(str1, str2) {
   return Math.round(((maxLen - distance) / maxLen) * 100);
 }
 
-// Calculate destination match score and route pass-through logic
 function calculateDestinationMatch(userDest, rideStart, rideEnd) {
   if (!userDest || !rideEnd) return { score: 0, passesThrough: false };
 
@@ -391,6 +388,88 @@ function serializeRide(id, data) {
   };
 }
 
+// ─── NOTIFICATION HELPERS ──────────────────────────────────
+
+// Captain post ride → Notify PASSENGERS in same city
+async function notifyPassengersAboutRide(ride, rideId, captainCity) {
+  try {
+    const passengersSnap = await db
+      .collection('users')
+      .where('role', 'in', ['customer', 'passenger'])
+      .get();
+
+    const targets = passengersSnap.docs.filter((doc) => {
+      const u = doc.data() || {};
+      if (!captainCity) return true;
+      return (u.city || '').toString().trim().toLowerCase() === captainCity;
+    });
+
+    await Promise.all(targets.map(doc => pushToUser(doc.id, {
+      title: '🚗 New Ride Available!',
+      body: `${ride.captainName} posted a ${ride.vehicleType} ride from ${ride.startLocation} to ${ride.endLocation}`,
+      type: 'new_ride',
+      data: {
+        rideId: rideId,
+        screen: 'find-ride',
+        vehicleType: ride.vehicleType,
+        startLocation: ride.startLocation,
+        endLocation: ride.endLocation,
+        suggestedFare: String(ride.suggestedFare)
+      },
+    })));
+
+    console.log(`✅ Notified ${targets.length} passengers about new ride`);
+  } catch (err) {
+    console.error('Passenger notification error:', err.message);
+  }
+}
+
+// Customer ride request → Notify CAPTAINS in same city
+async function notifyCaptainsAboutRequest(request, requestId, customerCity, vehicleType) {
+  try {
+    const captainsSnap = await db
+      .collection('users')
+      .where('role', '==', 'captain')
+      .where('isActive', '==', true)
+      .get();
+
+    let targets = captainsSnap.docs.filter((doc) => {
+      const u = doc.data() || {};
+      if (!customerCity) return true;
+      return (u.city || '').toString().trim().toLowerCase() === customerCity;
+    });
+
+    // Filter by vehicle type match
+    if (vehicleType && vehicleType !== 'any') {
+      targets = targets.filter((doc) => {
+        const u = doc.data() || {};
+        const captainVehicle = (u.captainVehicleType || '').toLowerCase();
+        return captainVehicle === vehicleType.toLowerCase();
+      });
+    }
+
+    await Promise.all(targets.map(doc => pushToUser(doc.id, {
+      title: '🧑 New Ride Request!',
+      body: `${request.customerName} needs a ride from ${request.startLocation} to ${request.endLocation}`,
+      type: 'customer_ride_request',
+      data: {
+        requestId: requestId,
+        screen: 'captain-requests',
+        customerId: request.customerId,
+        startLocation: request.startLocation,
+        endLocation: request.endLocation,
+        preferredFare: String(request.preferredFare || 0),
+      },
+    })));
+
+    console.log(`✅ Notified ${targets.length} captains about ride request`);
+  } catch (err) {
+    console.error('Captain notification error:', err.message);
+  }
+}
+
+// ─── CAPTAIN POST RIDE ────────────────────────────────────
+// Captain ride post → PASSENGERS ko notification
 const postRide = async (req, res) => {
   const uid = req.user ? req.user.uid : req.body.captainId;
   if (!uid) return res.status(400).json({ success: false, error: 'Captain ID is required', code: 'MISSING_CAPTAIN_ID' });
@@ -419,23 +498,19 @@ const postRide = async (req, res) => {
       cargoType, weightCapacity, truckSize, exactLocation, exactDropLocation,
     } = req.body;
 
-    // Validate rideMode
     const rideMode = req.body.rideMode || 'share';
     const normalizedRideMode = String(rideMode).toLowerCase();
     if (!['share', 'solo'].includes(normalizedRideMode)) {
       return res.status(400).json({ success: false, error: 'rideMode must be share or solo', code: 'INVALID_RIDE_MODE' });
     }
 
-    // Validate rideType and vehicleType
     const normalizedRideType = String(rideType || 'random').toLowerCase();
     const isTourRide = normalizedRideType === 'tour';
     const captainVehicleType = String(userData.captainVehicleType || '').toLowerCase();
     const normalizedVehicleType = String(vehicleType || '').toLowerCase();
 
-    // Allowed vehicle types
     const allowedVehicleTypes = ['car', 'bike', 'bus', 'truck', 'shazore'];
 
-    // Infer vehicle type - FIXED
     let inferredVehicleType;
     if (isTourRide) {
       inferredVehicleType = 'tour';
@@ -447,12 +522,10 @@ const postRide = async (req, res) => {
       inferredVehicleType = 'car';
     }
 
-    // Validate vehicle type
     if (!allowedVehicleTypes.includes(inferredVehicleType) && inferredVehicleType !== 'tour') {
       return res.status(400).json({ success: false, error: 'vehicleType must be one of car, bike, bus, truck, shazore', code: 'INVALID_VEHICLE_TYPE' });
     }
 
-    // Check captain vehicle type mismatch (only for non-tour rides)
     if (captainVehicleType && !isTourRide) {
       const postingType = inferredVehicleType === 'shazore' ? 'shazore' : inferredVehicleType;
       if (postingType !== captainVehicleType) {
@@ -542,7 +615,6 @@ const postRide = async (req, res) => {
       city: userData.city,
     });
 
-    // Build ride object
     const ride = {
       captainId: uid,
       captainName: userData.name || 'Anonymous',
@@ -575,7 +647,6 @@ const postRide = async (req, res) => {
       updatedAt: new Date().toISOString(),
     };
 
-    // Handle tour ride specific fields
     if (isTourRide) {
       const normalizedTourType = String(tourType || 'share').toLowerCase();
       if (!['share', 'solo'].includes(normalizedTourType)) {
@@ -594,7 +665,6 @@ const postRide = async (req, res) => {
       }
     }
 
-    // Handle truck / shazore specific fields
     if (inferredVehicleType === 'truck' || inferredVehicleType === 'shazore') {
       const normalizedTruckSize = String(truckSize || '').toLowerCase();
       if (normalizedTruckSize && !['mini', 'half', 'full'].includes(normalizedTruckSize)) {
@@ -605,8 +675,6 @@ const postRide = async (req, res) => {
       ride.truckSize = normalizedTruckSize || (inferredVehicleType === 'shazore' ? 'full' : null);
     }
 
-    // Fetch the real road route so search can match captains whose path
-    // actually passes through the customer's pickup/drop area.
     try {
       const routePolyline = await fetchRoutePolyline(
         ride.startLat, ride.startLng, ride.endLat, ride.endLng,
@@ -618,45 +686,91 @@ const postRide = async (req, res) => {
       console.error('Route polyline fetch failed (continuing without it):', routeErr.message);
     }
 
-    // Save to Firebase
     const ref = await db.collection('rides').add(ride);
 
-    // Send notifications
-    try {
-      const usersSnap = await db
-        .collection('users')
-        .where('role', 'in', ['customer', 'passenger'])
-        .get();
-      const captainCity = (userData.city || '').toString().trim().toLowerCase();
-      const targets = usersSnap.docs.filter((doc) => {
-        const u = doc.data() || {};
-        if (!captainCity) return true;
-        return (u.city || '').toString().trim().toLowerCase() === captainCity;
-      });
-      await Promise.all(targets.map(doc => pushToUser(doc.id, {
-        title: 'New Ride Available',
-        body: `New ride from ${ride.startLocation} to ${ride.endLocation} near you!${ride.exactLocation ? ` Exact pickup: ${ride.exactLocation}.` : ''}${ride.exactDropLocation ? ` Exact drop: ${ride.exactDropLocation}.` : ''}`,
-        type: 'new_ride',
-        data: { rideId: ref.id, screen: 'find-ride' },
-      })));
-    } catch (notifyErr) {
-      console.error('Ride notification error:', notifyErr.message);
-    }
+    // ─── NOTIFICATION: Captain ride → PASSENGERS ───
+    await notifyPassengersAboutRide(ride, ref.id, userData.city);
 
-    return res.status(201).json({ success: true, message: 'Ride posted successfully!', rideId: ref.id, ride: serializeRide(ref.id, ride) });
+    return res.status(201).json({
+      success: true,
+      message: 'Ride posted successfully!',
+      rideId: ref.id,
+      ride: serializeRide(ref.id, ride)
+    });
   } catch (err) {
     console.error('CRITICAL ERROR in postRide:', err);
     return res.status(500).json({ success: false, error: 'Internal Server Error: ' + err.message, code: 'POST_RIDE_ERROR' });
   }
 };
 
-/**
- * CHANGED: getActiveRides
- * Ab agar logged-in user (req.user.uid) ki us ride pe pehle se koi
- * active booking (pending/confirmed/started) hai, to wo ride sirf USI
- * user ki list se exclude hoti hai — baaqi dusre users ko wo ride
- * (agar seat available hai) normal show hoti rehti hai.
- */
+// ─── CUSTOMER POST RIDE REQUEST ──────────────────────────
+// Customer ride request → CAPTAINS ko notification
+const postCustomerRideRequest = async (req, res) => {
+  const uid = req.user ? req.user.uid : req.body.customerId;
+  if (!uid) return res.status(400).json({ success: false, error: 'Customer ID is required', code: 'MISSING_CUSTOMER_ID' });
+
+  try {
+    const userDoc = await db.collection('users').doc(uid).get();
+    if (!userDoc.exists) return res.status(404).json({ success: false, error: 'User profile not found.', code: 'USER_NOT_FOUND' });
+
+    const userData = userDoc.data();
+
+    const {
+      startLocation, endLocation,
+      startLat, startLng, endLat, endLng,
+      departureTime, preferredFare,
+      vehicleType, seats, exactLocation, exactDropLocation,
+    } = req.body;
+
+    if (!startLocation || !endLocation || !startLat || !startLng || !endLat || !endLng) {
+      return res.status(400).json({ success: false, error: 'Missing required fields', code: 'MISSING_FIELDS' });
+    }
+
+    const request = {
+      customerId: uid,
+      customerName: userData.name || 'Anonymous',
+      customerPhone: userData.phone || '',
+      startLocation: sanitizeString(labelFromLocation(startLocation), MAX_LOCATION),
+      endLocation: sanitizeString(labelFromLocation(endLocation), MAX_LOCATION),
+      exactLocation: exactLocation ? sanitizeString(labelFromLocation(exactLocation), MAX_LOCATION) : null,
+      exactDropLocation: exactDropLocation ? sanitizeString(labelFromLocation(exactDropLocation), MAX_LOCATION) : null,
+      startLat: parseNumber(startLat),
+      startLng: parseNumber(startLng),
+      endLat: parseNumber(endLat),
+      endLng: parseNumber(endLng),
+      departureTime: departureTime ? new Date(departureTime).toISOString() : new Date().toISOString(),
+      preferredFare: parseNumber(preferredFare) || 0,
+      vehicleType: String(vehicleType || 'any').toLowerCase(),
+      seats: parseInt(seats, 10) || 1,
+      status: 'pending',
+      isLadiesRide: ((userData.gender || '').toString().toLowerCase() === 'female'),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const ref = await db.collection('customerRideRequests').add(request);
+
+    // ─── NOTIFICATION: Customer request → CAPTAINS ───
+    await notifyCaptainsAboutRequest(request, ref.id, userData.city, request.vehicleType);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Ride request posted successfully! Captains will be notified.',
+      requestId: ref.id,
+      request,
+    });
+
+  } catch (err) {
+    console.error('CRITICAL ERROR in postCustomerRideRequest:', err);
+    return res.status(500).json({
+      success: false,
+      error: 'Internal Server Error: ' + err.message,
+      code: 'POST_REQUEST_ERROR'
+    });
+  }
+};
+
+// ─── GET ACTIVE RIDES ─────────────────────────────────────
 const getActiveRides = async (req, res) => {
 
   const { rideType, startLocation, endLocation, rideMode } = req.query;
@@ -679,9 +793,6 @@ const getActiveRides = async (req, res) => {
       if (requesterDoc.exists) requesterGender = (requesterDoc.data().gender || '').toString().toLowerCase();
     }
 
-    // Captain rides stay visible for 30 minutes after departureTime passes
-    // (grace period) before the background cleanup removes/completes them.
-    // CHANGED: 20 → 30 minutes
     const RIDE_GRACE_PERIOD_MS = 30 * 60 * 1000;
     const now = new Date().toISOString();
     const nowMs = Date.now();
@@ -699,21 +810,16 @@ const getActiveRides = async (req, res) => {
     }
     const snap = await query.limit(fetchLimit).get();
     let rides = snap.docs.map(d => serializeRide(d.id, d.data()));
-    // Flag rides whose departure time has already passed but are still
-    // within the 30-minute grace window, so the frontend can show them
-    // as "ended" (e.g. in red) instead of hiding them outright.
     rides = rides.map((r) => ({
       ...r,
       isGracePeriod: new Date(r.departureTime || 0).getTime() < nowMs,
     }));
     const lastDoc = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
 
-    // Filter ladies rides
     if (requesterGender !== 'female') {
       rides = rides.filter(r => r.isLadiesRide !== true);
     }
 
-    // Filter by rideType / vehicleType
     if (rideType) {
       const rt = String(rideType).toLowerCase();
       if (['car', 'bike', 'bus', 'truck'].includes(rt)) {
@@ -730,7 +836,6 @@ const getActiveRides = async (req, res) => {
       }
     }
 
-    // Filter by rideMode
     if (rideMode) {
       const rm = String(rideMode).toLowerCase();
       if (['solo', 'share'].includes(rm)) {
@@ -738,8 +843,6 @@ const getActiveRides = async (req, res) => {
       }
     }
 
-    // Exclude rides the current user already has an active booking on —
-    // other users still see these rides normally.
     if (req.user?.uid) {
       try {
         const myDealsSnap = await db
@@ -856,6 +959,7 @@ const getActiveRides = async (req, res) => {
   }
 };
 
+// ─── UPDATE RIDE STATUS ──────────────────────────────────
 const updateRideStatus = async (req, res) => {
   const { rideId } = req.params;
   const { status } = req.body;
@@ -875,6 +979,7 @@ const updateRideStatus = async (req, res) => {
   }
 };
 
+// ─── UPDATE RIDE ──────────────────────────────────────────
 const updateRide = async (req, res) => {
   const { rideId } = req.params;
   const uid = req.user ? req.user.uid : req.body.captainId;
@@ -1027,6 +1132,7 @@ const updateRide = async (req, res) => {
   }
 };
 
+// ─── DELETE RIDE ──────────────────────────────────────────
 const deleteRide = async (req, res) => {
   const { rideId } = req.params;
   const uid = req.user ? req.user.uid : req.body.captainId;
@@ -1076,6 +1182,7 @@ const deleteRide = async (req, res) => {
   }
 };
 
+// ─── GET MY RIDES ─────────────────────────────────────────
 const getMyRides = async (req, res) => {
   const uid = req.user ? req.user.uid : req.query.captainId;
   if (!uid) return res.status(400).json({ success: false, error: 'Captain ID is required', code: 'MISSING_CAPTAIN_ID' });
@@ -1090,6 +1197,7 @@ const getMyRides = async (req, res) => {
   }
 };
 
+// ─── GET RIDE BY ID ───────────────────────────────────────
 const getRideById = async (req, res) => {
   const { rideId } = req.params;
   try {
@@ -1103,6 +1211,7 @@ const getRideById = async (req, res) => {
   }
 };
 
+// ─── UPDATE RIDE LOCATION ─────────────────────────────────
 const updateRideLocation = async (req, res) => {
   const { rideId } = req.params;
   const { lat, lng } = req.body;
@@ -1121,18 +1230,17 @@ const updateRideLocation = async (req, res) => {
   }
 };
 
+// ─── GET CAPTAIN STATS ────────────────────────────────────
 const getCaptainStats = async (req, res) => {
   try {
     const captainId = req.user.uid;
     const now = new Date();
 
-    // Period boundaries
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const startOfWeek = new Date(startOfToday);
-    startOfWeek.setDate(startOfToday.getDate() - startOfToday.getDay()); // Sunday
+    startOfWeek.setDate(startOfToday.getDate() - startOfToday.getDay());
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    // Fetch all completed rides for this captain
     const ridesSnap = await db
       .collection('rides')
       .where('captainId', '==', captainId)
@@ -1145,7 +1253,6 @@ const getCaptainStats = async (req, res) => {
       .where('status', '==', DEAL_STATUS.COMPLETED)
       .get();
 
-    // Fetch all earning transactions for this captain
     const txSnap = await db
       .collection('transactions')
       .where('walletId', '==', captainId)
@@ -1219,8 +1326,10 @@ const getCaptainStats = async (req, res) => {
   }
 };
 
+// ─── EXPORTS ──────────────────────────────────────────────
 module.exports = {
-  postRide,
+  postRide,                    // Captain post ride → PASSENGERS ko notification
+  postCustomerRideRequest,     // Customer post request → CAPTAINS ko notification
   getActiveRides,
   updateRideStatus,
   getMyRides,
