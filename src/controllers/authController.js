@@ -1,7 +1,6 @@
 const { db } = require('../config/firebase');
 const { CAPTAIN_STARTER_BALANCE } = require('../utils/walletHelper');
 
-// ✅ NEW: Added emergency contact fields and photoUrl
 const ALLOWED_USER_FIELDS = [
   'name',
   'phone',
@@ -15,11 +14,8 @@ const ALLOWED_USER_FIELDS = [
   'vehicleSeats',
   'city',
   'vehiclePhotoUrl',
-  'photoUrl', // ✅ NEW: Profile Image URL
   'captainVehicleType',
   'captainVerificationStatus',
-  'emergencyContactName',   // ✅ NEW
-  'emergencyContactPhone',  // ✅ NEW
 ];
 
 // Simple in-memory cache for profiles (5 seconds TTL)
@@ -117,11 +113,7 @@ const syncUser = async (req, res) => {
         vehicleSeats: body.vehicleSeats ? parseInt(body.vehicleSeats, 10) : null,
         city: body.city || null,
         vehiclePhotoUrl: body.vehiclePhotoUrl || null,
-        photoUrl: body.photoUrl || null, // ✅ NEW: Profile Image URL
         captainVehicleType: body.captainVehicleType || null,
-        // ✅ NEW: Emergency Contact Fields
-        emergencyContactName: body.emergencyContactName || null,
-        emergencyContactPhone: body.emergencyContactPhone || null,
         rating: 0.0,
         totalRides: 0,
         fcmToken: null,
@@ -163,7 +155,11 @@ const syncUser = async (req, res) => {
       (!existingStatus || String(existingStatus).trim() === '') &&
       updates.captainVerificationStatus === undefined
     ) {
-      updates.captainVerificationStatus = 'pending_verification';
+      const hasVehicleInfo =
+        (updates.vehicleModel || existing.vehicleModel) &&
+        (updates.vehicleRegistration || existing.vehicleRegistration) &&
+        (updates.vehiclePhotoUrl || existing.vehiclePhotoUrl);
+      updates.captainVerificationStatus = hasVehicleInfo ? 'pending_verification' : 'unverified';
     }
     
     if (Object.keys(updates).length > 0) {
@@ -265,7 +261,11 @@ const updateProfile = async (req, res) => {
       (!existingStatus || String(existingStatus).trim() === '') &&
       updates.captainVerificationStatus === undefined
     ) {
-      updates.captainVerificationStatus = 'pending_verification';
+      const hasVehicleInfo =
+        (updates.vehicleModel || existing.vehicleModel) &&
+        (updates.vehicleRegistration || existing.vehicleRegistration) &&
+        (updates.vehiclePhotoUrl || existing.vehiclePhotoUrl);
+      updates.captainVerificationStatus = hasVehicleInfo ? 'pending_verification' : 'unverified';
     }
 
     if (updates.captainVerificationStatus === 'pending_verification') {
