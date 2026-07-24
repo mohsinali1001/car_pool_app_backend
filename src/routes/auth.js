@@ -62,14 +62,20 @@ router.patch('/profile/captain', verifyToken, async (req, res) => {
 
     const userRef = db.collection('users').doc(req.user.uid);
     const userSnap = await userRef.get();
-    const existingStatus = userSnap.exists ? userSnap.data().captainVerificationStatus : null;
+    const userData = userSnap.exists ? userSnap.data() : {};
+    const existingStatus = userData.captainVerificationStatus;
     const lockedStatus =
       existingStatus === 'pending_verification' || existingStatus === 'verified';
+
+    const hasVehicleInfo =
+      (vehicleModel || userData.vehicleModel) &&
+      (vehicleRegistration || userData.vehicleRegistration) &&
+      (vehiclePhotoUrl || userData.vehiclePhotoUrl);
 
     const updateData = {
       captainVerificationStatus: lockedStatus
         ? existingStatus
-        : captainVerificationStatus || existingStatus || 'pending_verification',
+        : captainVerificationStatus || existingStatus || (hasVehicleInfo ? 'pending_verification' : 'unverified'),
       isVerified: false,
       updatedAt: new Date().toISOString(),
     };
