@@ -32,6 +32,7 @@ router.patch('/profile/captain', verifyToken, async (req, res) => {
     vehicleRegistration,
     vehicleYear,
     vehicleSeats,
+    vehiclePhotoUrl,
   } = req.body;
 
   try {
@@ -96,6 +97,7 @@ router.patch('/profile/captain', verifyToken, async (req, res) => {
     setIfPresent('vehicleRegistration', vehicleRegistration, (v) => String(v).trim());
     setIfPresent('vehicleYear', vehicleYear);
     setIfPresent('vehicleSeats', vehicleSeats);
+    setIfPresent('vehiclePhotoUrl', vehiclePhotoUrl, (v) => String(v).trim());
 
     if (gender !== undefined) {
       updateData.gender = genderValue;
