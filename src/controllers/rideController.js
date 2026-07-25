@@ -390,49 +390,23 @@ function serializeRide(id, data) {
 
 // ─── NOTIFICATION HELPERS ──────────────────────────────────
 
-// Captain post ride → Notify PASSENGERS whose route request intersects this ride
+// Captain post ride → Notify PASSENGERS in same city
 async function notifyPassengersAboutRide(ride, rideId, captainCity) {
   try {
     const passengersSnap = await db
-      .collection('customerRideRequests')
-      .where('status', 'in', ['open', 'countered'])
+      .collection('users')
+      .where('role', 'in', ['customer', 'passenger'])
       .get();
 
-    const targets = [];
-    passengersSnap.docs.forEach((doc) => {
-      const reqData = doc.data();
-      if (!reqData) return;
-
-      // Filter by city first
-      const reqCity = (reqData.city || '').toString().trim().toLowerCase();
-      const capCity = (captainCity || '').toString().trim().toLowerCase();
-      if (capCity && reqCity && reqCity !== capCity) {
-        return;
-      }
-
-      // Map request coordinates to search parameter format
-      const search = {
-        pickupLat: reqData.startLat,
-        pickupLng: reqData.startLng,
-        destLat: reqData.endLat,
-        destLng: reqData.endLng,
-        pickupRadiusKm: 5.0,
-        destinationRadiusKm: 5.0,
-        routeRadiusKm: 5.0,
-        startLocation: reqData.startLocation || '',
-        endLocation: reqData.endLocation || '',
-      };
-
-      const score = routeMatchScore(ride, search);
-      if (score && score.routeIncludesJourney) {
-        targets.push(reqData.customerId);
-      }
+    const targets = passengersSnap.docs.filter((doc) => {
+      const u = doc.data() || {};
+      if (!captainCity) return true;
+      return (u.city || '').toString().trim().toLowerCase() === captainCity;
     });
 
-    const uniqueCustomerIds = [...new Set(targets)];
-    await Promise.all(uniqueCustomerIds.map(customerId => pushToUser(customerId, {
-      title: '🚗 New Ride on Your Route!',
-      body: `${ride.captainName} posted a ${ride.vehicleType} ride matching your route from ${ride.startLocation} to ${ride.endLocation}`,
+    await Promise.all(targets.map(doc => pushToUser(doc.id, {
+      title: '🚗 New Ride Available!',
+      body: `${ride.captainName} posted a ${ride.vehicleType} ride from ${ride.startLocation} to ${ride.endLocation}`,
       type: 'new_ride',
       data: {
         rideId: rideId,
@@ -444,62 +418,39 @@ async function notifyPassengersAboutRide(ride, rideId, captainCity) {
       },
     })));
 
-    console.log(`✅ Smart-notified ${uniqueCustomerIds.length} passengers about matching ride`);
+    console.log(`✅ Notified ${targets.length} passengers about new ride`);
   } catch (err) {
     console.error('Passenger notification error:', err.message);
   }
 }
 
-// Customer ride request → Notify CAPTAINS whose active ride route intersects this request
+// Customer ride request → Notify CAPTAINS in same city
 async function notifyCaptainsAboutRequest(request, requestId, customerCity, vehicleType) {
   try {
-    const ridesSnap = await db
-      .collection('rides')
-      .where('status', '==', 'active')
+    const captainsSnap = await db
+      .collection('users')
+      .where('role', '==', 'captain')
+      .where('isActive', '==', true)
       .get();
 
-    const targets = [];
-    ridesSnap.docs.forEach((doc) => {
-      const ride = doc.data();
-      if (!ride) return;
-
-      // Filter by city first
-      const reqCity = (customerCity || '').toString().trim().toLowerCase();
-      const rideCity = (ride.city || '').toString().trim().toLowerCase();
-      if (reqCity && rideCity && rideCity !== reqCity) {
-        return;
-      }
-
-      // Filter by vehicle type if specified
-      if (vehicleType && vehicleType !== 'any') {
-        if (String(ride.vehicleType).toLowerCase() !== vehicleType.toLowerCase()) {
-          return;
-        }
-      }
-
-      // Map request coordinates to search parameters
-      const search = {
-        pickupLat: request.startLat,
-        pickupLng: request.startLng,
-        destLat: request.endLat,
-        destLng: request.endLng,
-        pickupRadiusKm: 5.0,
-        destinationRadiusKm: 5.0,
-        routeRadiusKm: 5.0,
-        startLocation: request.startLocation || '',
-        endLocation: request.endLocation || '',
-      };
-
-      const score = routeMatchScore(ride, search);
-      if (score && score.routeIncludesJourney) {
-        targets.push(ride.captainId);
-      }
+    let targets = captainsSnap.docs.filter((doc) => {
+      const u = doc.data() || {};
+      if (!customerCity) return true;
+      return (u.city || '').toString().trim().toLowerCase() === customerCity;
     });
 
-    const uniqueCaptainIds = [...new Set(targets)];
-    await Promise.all(uniqueCaptainIds.map(captainId => pushToUser(captainId, {
-      title: '🧑 New Request on Your Route!',
-      body: `${request.customerName} needs a ride matching your route from ${request.startLocation} to ${request.endLocation}`,
+    // Filter by vehicle type match
+    if (vehicleType && vehicleType !== 'any') {
+      targets = targets.filter((doc) => {
+        const u = doc.data() || {};
+        const captainVehicle = (u.captainVehicleType || '').toLowerCase();
+        return captainVehicle === vehicleType.toLowerCase();
+      });
+    }
+
+    await Promise.all(targets.map(doc => pushToUser(doc.id, {
+      title: '🧑 New Ride Request!',
+      body: `${request.customerName} needs a ride from ${request.startLocation} to ${request.endLocation}`,
       type: 'customer_ride_request',
       data: {
         requestId: requestId,
@@ -511,7 +462,7 @@ async function notifyCaptainsAboutRequest(request, requestId, customerCity, vehi
       },
     })));
 
-    console.log(`✅ Smart-notified ${uniqueCaptainIds.length} captains about matching request`);
+    console.log(`✅ Notified ${targets.length} captains about ride request`);
   } catch (err) {
     console.error('Captain notification error:', err.message);
   }
@@ -558,10 +509,10 @@ const postRide = async (req, res) => {
     const captainVehicleType = String(userData.captainVehicleType || '').toLowerCase();
     const normalizedVehicleType = String(vehicleType || '').toLowerCase();
 
-    const allowedVehicleTypes = ['car', 'bike', 'bus', 'truck', 'shazore', 'tour'];
+    const allowedVehicleTypes = ['car', 'bike', 'bus', 'truck', 'shazore'];
 
     let inferredVehicleType;
-    if (isTourRide || normalizedVehicleType === 'tour' || captainVehicleType === 'tour') {
+    if (isTourRide) {
       inferredVehicleType = 'tour';
     } else if (normalizedVehicleType && allowedVehicleTypes.includes(normalizedVehicleType)) {
       inferredVehicleType = normalizedVehicleType;
@@ -571,11 +522,11 @@ const postRide = async (req, res) => {
       inferredVehicleType = 'car';
     }
 
-    if (!allowedVehicleTypes.includes(inferredVehicleType)) {
-      return res.status(400).json({ success: false, error: 'vehicleType must be one of car, bike, bus, truck, shazore, tour', code: 'INVALID_VEHICLE_TYPE' });
+    if (!allowedVehicleTypes.includes(inferredVehicleType) && inferredVehicleType !== 'tour') {
+      return res.status(400).json({ success: false, error: 'vehicleType must be one of car, bike, bus, truck, shazore', code: 'INVALID_VEHICLE_TYPE' });
     }
 
-    if (captainVehicleType && !isTourRide && captainVehicleType !== 'tour' && normalizedVehicleType !== 'tour') {
+    if (captainVehicleType && !isTourRide) {
       const postingType = inferredVehicleType === 'shazore' ? 'shazore' : inferredVehicleType;
       if (postingType !== captainVehicleType) {
         return res.status(403).json({ success: false, error: `You can only post ${captainVehicleType} rides`, code: 'VEHICLE_TYPE_MISMATCH' });
@@ -1389,5 +1340,4 @@ module.exports = {
   getCaptainStats,
   calculateRouteProximityMeters,
   buildRideRouteSummary,
-  notifyCaptainsAboutRequest,
 };
