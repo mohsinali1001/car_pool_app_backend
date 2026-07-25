@@ -301,13 +301,24 @@ const createCustomerRequest = async (req, res) => {
     await ref.set(request);
 
     try {
-      const { notifyCaptainsAboutRequest } = require('./rideController');
-      await notifyCaptainsAboutRequest(
-        request,
-        ref.id,
-        request.city,
-        request.vehicleType
-      );
+      const captainsSnap = await db
+        .collection('users')
+        .where('role', '==', 'captain')
+        .get();
+      const requestCity = (request.city || '').toString().trim().toLowerCase();
+      const targets = captainsSnap.docs.filter((doc) => {
+        const captain = doc.data() || {};
+        if (!requestCity) return true;
+        return (captain.city || '').toString().trim().toLowerCase() === requestCity;
+      });
+      await Promise.all(targets.map((doc) =>
+        pushToUser(doc.id, {
+          title: 'New Customer Request',
+          body: `${request.customerName} needs a ride from ${request.startLocation} to ${request.endLocation}. ${request.pickupLocation ? `Pickup: ${request.pickupLocation}.` : ''}${request.dropLocation ? ` Drop: ${request.dropLocation}.` : ''}`,
+          type: 'customer_request',
+          data: { requestId: ref.id, screen: 'customer-requests' },
+        }),
+      ));
     } catch (notifyErr) {
       console.error('Customer request notification error:', notifyErr.message);
     }
