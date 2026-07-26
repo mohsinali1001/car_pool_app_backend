@@ -14,7 +14,7 @@ const {
 const { CAPTAIN_STARTER_BALANCE } = require('../utils/walletHelper');
 
 const PLATFORM_FEE_PERCENT = 0.05;
-const BOOKING_RETENTION_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
+const BOOKING_RETENTION_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 function generalPickupArea(address) {
   if (!address || typeof address !== 'string') return 'Along route';
@@ -55,13 +55,10 @@ async function syncRideStatusFromDeals(rideId) {
     return;
   }
 
-  const openDeals = deals.filter((d) =>
-    [DEAL_STATUS.PENDING, DEAL_STATUS.CONFIRMED].includes(d.status),
-  );
   const availableSeats = ride.availableSeats ?? ride.totalSeats ?? 0;
 
   await rideRef.update({
-    status: availableSeats <= 0 && openDeals.length === 0 ? RIDE_STATUS.FILLED : RIDE_STATUS.ACTIVE,
+    status: availableSeats <= 0 ? RIDE_STATUS.FILLED : RIDE_STATUS.ACTIVE,
     full: availableSeats <= 0,
     updatedAt: new Date().toISOString(),
   });
@@ -235,8 +232,14 @@ async function _executeConfirmTransaction(dealId, actorUid, options = {}) {
     const rideDoc = await t.get(rideRef);
     if (!rideDoc.exists) throw new Error('Ride not found');
     const ride = rideDoc.data();
+    if (ride.status !== RIDE_STATUS.ACTIVE && ride.status !== RIDE_STATUS.FILLED) {
+      throw Object.assign(new Error('Ride is no longer available'), {
+        code: 'RIDE_UNAVAILABLE',
+        statusCode: 400,
+      });
+    }
     const available = ride.availableSeats ?? ride.totalSeats ?? 0;
-    if (available <= 0) {
+    if (ride.full === true || available <= 0 || ride.status === RIDE_STATUS.FILLED) {
       throw Object.assign(new Error('Ride is full'), { code: 'RIDE_FULL', statusCode: 400 });
     }
 
@@ -901,7 +904,7 @@ const rateDeal = async (req, res) => {
 };
 
 /**
- * getMyBookings - unchanged (3-day filter)
+ * getMyBookings - terminal history is retained for six hours
  */
 const getMyBookings = async (req, res) => {
   try {
@@ -964,7 +967,7 @@ const getMyDeals = async (req, res) => {
       let deal = { id: doc.id, ...doc.data() };
       const status = (deal.status || '').toString().toLowerCase();
 
-      // Keep all deals except completed/cancelled older than 3 days
+      // Keep all deals except completed/cancelled older than six hours
       if ([DEAL_STATUS.COMPLETED, DEAL_STATUS.CANCELLED].includes(status)) {
         const terminalAtRaw = deal.completedAt || deal.updatedAt || deal.createdAt || null;
         const terminalAt = terminalAtRaw ? new Date(terminalAtRaw).getTime() : NaN;

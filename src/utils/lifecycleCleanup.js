@@ -18,9 +18,9 @@ const ACCEPTED_REQUEST_RETENTION_MS = 10 * 60 * 1000;
 // ⚠️ Ab yeh values CLEANUP_TIMINGS se override hongi, lekin variables rakhe hain
 // taki existing code break na ho.
 const RIDE_GRACE_PERIOD_MS = CLEANUP_TIMINGS.RIDE_GRACE_PERIOD;
-const COMPLETED_DEAL_RETENTION_MS = CLEANUP_TIMINGS.PASSENGER_COMPLETED_RETENTION; // 4.5h
+const COMPLETED_DEAL_RETENTION_MS = CLEANUP_TIMINGS.PASSENGER_COMPLETED_RETENTION; // 6h
 const TERMINAL_DEAL_STATUSES = [DEAL_STATUS.COMPLETED, DEAL_STATUS.CANCELLED];
-const DEAL_ARCHIVE_RETENTION_MS = CLEANUP_TIMINGS.CONFIRMED_ARCHIVE; // 24h
+const DEAL_ARCHIVE_RETENTION_MS = CLEANUP_TIMINGS.CONFIRMED_ARCHIVE; // 6h
 
 // ======================== HELPER FUNCTIONS ========================
 function isPastIso(value, now = new Date()) {
@@ -55,7 +55,7 @@ async function cleanupExpiredRides() {
 
   for (const doc of snap.docs) {
     const ride = doc.data() || {};
-    // Grace period (20min) ke baad hi process karein
+    // Grace period (30min) ke baad hi process karein
     if (!isOlderThanIso(ride.departureTime, RIDE_GRACE_PERIOD_MS, now)) continue;
 
     console.log(`[Cleanup] Processing expired ride: ${doc.id}`);
@@ -247,7 +247,7 @@ async function cleanupExpiredCustomerRequests() {
   console.log(`[Cleanup] Processed ${writes} expired customer requests.`);
 }
 
-// ======================== 3. AUTO-ARCHIVE CONFIRMED DEALS (24h) ========================
+// ======================== 3. AUTO-ARCHIVE CONFIRMED DEALS (6h) ========================
 async function autoArchiveConfirmedDeals() {
   const now = new Date();
   const cutoff = new Date(now.getTime() - DEAL_ARCHIVE_RETENTION_MS);
@@ -274,20 +274,23 @@ async function autoArchiveConfirmedDeals() {
       const refTime = data.confirmedAt || data.updatedAt || data.createdAt;
       if (!isOlderThanIso(refTime, DEAL_ARCHIVE_RETENTION_MS, now)) continue;
 
-      console.log(`[Cleanup] Auto-archiving confirmed deal: ${doc.id}`);
-      batch.update(doc.ref, {
-        status: DEAL_STATUS.COMPLETED,
-        completedAt: now.toISOString(),
-        updatedAt: now.toISOString(),
-        autoArchived: true,
-        autoArchiveReason: '24_hours_confirmed',
-      });
+      // Do not remove a booking for a future ride. Once the ride has ended,
+      // confirmed history is no longer actionable and can be cleaned safely.
+      let rideDeparture = data.departureTime;
+      if (!rideDeparture && data.rideId) {
+        const rideDoc = await db.collection('rides').doc(data.rideId).get();
+        rideDeparture = rideDoc.exists ? rideDoc.data()?.departureTime : null;
+      }
+      if (!isPastIso(rideDeparture, now)) continue;
+
+      console.log(`[Cleanup] Removing stale confirmed deal: ${doc.id}`);
+      batch.delete(doc.ref);
       count++;
     }
 
     if (count > 0) {
       await batch.commit();
-      console.log(`[Cleanup] Auto-archived ${count} confirmed deals (older than 24h).`);
+      console.log(`[Cleanup] Removed ${count} stale confirmed deals (older than 6h).`);
     }
   } catch (err) {
     console.error('[Cleanup] Error in autoArchiveConfirmedDeals:', err);
@@ -295,11 +298,10 @@ async function autoArchiveConfirmedDeals() {
 }
 
 // ======================== 4. CLEANUP OLD COMPLETED DEALS (History) ========================
-// Yeh function completed/cancelled deals ko delete karega after 4.5 hours (passenger) / 4 hours (captain)
-// Since same collection, 4.5 hours use karte hain (dono ko cover).
+// Yeh function completed/cancelled deals ko delete karega after six hours.
 async function cleanupOldCompletedDeals() {
   const now = new Date();
-  const retentionMs = CLEANUP_TIMINGS.PASSENGER_COMPLETED_RETENTION; // 4.5h
+  const retentionMs = CLEANUP_TIMINGS.PASSENGER_COMPLETED_RETENTION; // 6h
   const cutoff = new Date(now - retentionMs);
 
   try {

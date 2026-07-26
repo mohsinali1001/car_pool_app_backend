@@ -102,9 +102,9 @@ function pointProjectionOnRoute(pointLat, pointLng, startLat, startLng, endLat, 
 }
 
 function routeMatchScore(ride, search) {
-  const pickupRadiusKm = search.pickupRadiusKm;
-  const destinationRadiusKm = search.destinationRadiusKm;
-  const routeRadiusKm = search.routeRadiusKm;
+  const pickupRadiusKm = search.pickupRadiusKm ?? 3;
+  const destinationRadiusKm = search.destinationRadiusKm ?? 3;
+  const routeRadiusKm = search.routeRadiusKm ?? 2.5;
   const pickupLat = search.pickupLat;
   const pickupLng = search.pickupLng;
   const destLat = search.destLat;
@@ -187,6 +187,7 @@ function routeMatchScore(ride, search) {
     captainDistanceFromPickup: captainCurrentKm,
     pickupProgress: pickupProjection?.t ?? null,
     destinationProgress: destinationProjection?.t ?? null,
+    routeIncludesJourney,
     isDirectMatch: pickupNearStart && destinationNearEnd,
     isProximityMatch: routeIncludesJourney || pickupOnRoute || destinationOnRoute,
   };
@@ -416,9 +417,9 @@ async function notifyPassengersAboutRide(ride, rideId, captainCity) {
         pickupLng: reqData.startLng,
         destLat: reqData.endLat,
         destLng: reqData.endLng,
-        pickupRadiusKm: 5.0,
-        destinationRadiusKm: 5.0,
-        routeRadiusKm: 5.0,
+        pickupRadiusKm: 3.0,
+        destinationRadiusKm: 3.0,
+        routeRadiusKm: 2.5,
         startLocation: reqData.startLocation || '',
         endLocation: reqData.endLocation || '',
       };
@@ -463,6 +464,16 @@ async function notifyCaptainsAboutRequest(request, requestId, customerCity, vehi
       const ride = doc.data();
       if (!ride) return;
 
+      const departureMs = new Date(ride.departureTime || '').getTime();
+      if (!Number.isFinite(departureMs) || departureMs < Date.now() - 30 * 60 * 1000) {
+        return;
+      }
+      if (String(ride.rideType || '').toLowerCase() === 'tour' ||
+          String(ride.vehicleType || '').toLowerCase() === 'tour' ||
+          ride.full === true || Number(ride.availableSeats || 0) <= 0) {
+        return;
+      }
+
       // Filter by city first
       const reqCity = (customerCity || '').toString().trim().toLowerCase();
       const rideCity = (ride.city || '').toString().trim().toLowerCase();
@@ -483,9 +494,9 @@ async function notifyCaptainsAboutRequest(request, requestId, customerCity, vehi
         pickupLng: request.startLng,
         destLat: request.endLat,
         destLng: request.endLng,
-        pickupRadiusKm: 5.0,
-        destinationRadiusKm: 5.0,
-        routeRadiusKm: 5.0,
+        pickupRadiusKm: 3.0,
+        destinationRadiusKm: 3.0,
+        routeRadiusKm: 2.5,
         startLocation: request.startLocation || '',
         endLocation: request.endLocation || '',
       };
@@ -545,6 +556,7 @@ const postRide = async (req, res) => {
       rideType, vehicleType, acceptsDelivery, vehicleInfo,
       tourType, maxPassengers,
       cargoType, weightCapacity, truckSize, exactLocation, exactDropLocation,
+      routeDescription,
     } = req.body;
 
     const rideMode = req.body.rideMode || 'share';
@@ -586,7 +598,8 @@ const postRide = async (req, res) => {
       exceedsMaxLength(startLocation, MAX_LOCATION) ||
       exceedsMaxLength(endLocation, MAX_LOCATION) ||
       exceedsMaxLength(exactLocation, MAX_LOCATION) ||
-      exceedsMaxLength(exactDropLocation, MAX_LOCATION)
+      exceedsMaxLength(exactDropLocation, MAX_LOCATION) ||
+      exceedsMaxLength(routeDescription, MAX_LOCATION)
     ) {
       return res.status(400).json({
         success: false,
@@ -602,6 +615,9 @@ const postRide = async (req, res) => {
       : '';
     const rawExactDropLocation = exactDropLocation
       ? sanitizeString(labelFromLocation(exactDropLocation), MAX_LOCATION)
+      : '';
+    const rawRouteDescription = routeDescription
+      ? sanitizeString(routeDescription, MAX_LOCATION)
       : '';
 
     if (!rawStartLocation || !rawEndLocation || !departureTime || !totalSeats || !suggestedFare) {
@@ -674,6 +690,7 @@ const postRide = async (req, res) => {
       endLocation: normalizedLabels.endLocation,
       exactLocation: rawExactLocation || null,
       exactDropLocation: rawExactDropLocation || null,
+      routeDescription: rawRouteDescription || null,
       startLat: parsedStartLat,
       startLng: parsedStartLng,
       endLat: parsedEndLat,
@@ -736,9 +753,6 @@ const postRide = async (req, res) => {
     }
 
     const ref = await db.collection('rides').add(ride);
-
-    // ─── NOTIFICATION: Captain ride → PASSENGERS ───
-    await notifyPassengersAboutRide(ride, ref.id, userData.city);
 
     return res.status(201).json({
       success: true,
@@ -827,9 +841,9 @@ const getActiveRides = async (req, res) => {
   const afterId = (req.query.after || req.query.lastDocId || '').toString().trim();
   const hasRouteSearch = Boolean(startLocation || endLocation || req.query.lat || req.query.lng);
   const fetchLimit = hasRouteSearch ? Math.min(Math.max(pageLimit * 5, 75), 150) : pageLimit;
-  const pickupRadiusKm = Math.min(Math.max(parseNumber(req.query.pickupRadiusKm) || 8, 1), 30);
-  const destinationRadiusKm = Math.min(Math.max(parseNumber(req.query.destinationRadiusKm) || 10, 1), 40);
-  const routeRadiusKm = Math.min(Math.max(parseNumber(req.query.routeRadiusKm) || 6, 1), 25);
+  const pickupRadiusKm = Math.min(Math.max(parseNumber(req.query.pickupRadiusKm) || 3, 0.5), 10);
+  const destinationRadiusKm = Math.min(Math.max(parseNumber(req.query.destinationRadiusKm) || 3, 0.5), 10);
+  const routeRadiusKm = Math.min(Math.max(parseNumber(req.query.routeRadiusKm) || 2.5, 0.5), 10);
   try {
     await maybeCleanupExpiredRides();
     const userLat = parseNumber(req.query.lat ?? req.query.pickupLat);
@@ -885,12 +899,24 @@ const getActiveRides = async (req, res) => {
       }
     }
 
+    const wantsTours = String(rideType || '').toLowerCase() === 'tour';
+    if (!wantsTours) {
+      rides = rides.filter((r) =>
+        (r.rideType || '').toString().toLowerCase() !== 'tour' &&
+        (r.vehicleType || '').toString().toLowerCase() !== 'tour'
+      );
+    }
+
     if (rideMode) {
       const rm = String(rideMode).toLowerCase();
       if (['solo', 'share'].includes(rm)) {
         rides = rides.filter(r => (r.rideMode || 'share').toString().toLowerCase() === rm);
       }
     }
+
+    // Never expose a ride that has no bookable seat left, even if a legacy
+    // record still has an active status.
+    rides = rides.filter((r) => r.full !== true && Number(r.availableSeats || 0) > 0);
 
     if (req.user?.uid) {
       try {
@@ -938,10 +964,12 @@ const getActiveRides = async (req, res) => {
                 levenshteinSimilarity(startLocation, r.exactLocation),
               )
             : 0;
-          const suitable =
-            coordinateMatch?.suitable === true ||
-            labelOverlap ||
-            (pickupLabelScore >= 80 && (!endLocation || destMatch.score >= 70 || destMatch.passesThrough));
+          // Coordinates are authoritative. Text similarity is only a fallback
+          // for legacy clients that cannot provide map coordinates.
+          const suitable = canCoordinateMatch
+            ? coordinateMatch?.suitable === true
+            : labelOverlap ||
+              (pickupLabelScore >= 80 && (!endLocation || destMatch.score >= 70 || destMatch.passesThrough));
           const relevanceScore =
             (coordinateMatch?.score || 0) +
             (labelOverlap ? 20 : 0) +
@@ -971,6 +999,9 @@ const getActiveRides = async (req, res) => {
           if ((a.routeMatchScore || 0) !== (b.routeMatchScore || 0)) {
             return (b.routeMatchScore || 0) - (a.routeMatchScore || 0);
           }
+          const aCreated = Date.parse(a.createdAt || '') || 0;
+          const bCreated = Date.parse(b.createdAt || '') || 0;
+          if (aCreated !== bCreated) return bCreated - aCreated;
           const aPickup = a.distanceFromPickup == null ? Number.MAX_SAFE_INTEGER : a.distanceFromPickup;
           const bPickup = b.distanceFromPickup == null ? Number.MAX_SAFE_INTEGER : b.distanceFromPickup;
           if (aPickup !== bPickup) return aPickup - bPickup;
@@ -1058,13 +1089,15 @@ const updateRide = async (req, res) => {
       rideMode,
       exactLocation,
       exactDropLocation,
+      routeDescription,
     } = req.body;
 
     if (
       startLocation != null && exceedsMaxLength(startLocation, MAX_LOCATION) ||
       endLocation != null && exceedsMaxLength(endLocation, MAX_LOCATION) ||
       exactLocation != null && exceedsMaxLength(exactLocation, MAX_LOCATION) ||
-      exactDropLocation != null && exceedsMaxLength(exactDropLocation, MAX_LOCATION)
+      exactDropLocation != null && exceedsMaxLength(exactDropLocation, MAX_LOCATION) ||
+      routeDescription != null && exceedsMaxLength(routeDescription, MAX_LOCATION)
     ) {
       return res.status(400).json({
         success: false,
@@ -1077,6 +1110,9 @@ const updateRide = async (req, res) => {
     const nextEndLocation = endLocation != null ? sanitizeString(labelFromLocation(endLocation), MAX_LOCATION) : existingRide.endLocation;
     const nextExactLocation = exactLocation != null ? sanitizeString(labelFromLocation(exactLocation), MAX_LOCATION) : existingRide.exactLocation;
     const nextExactDropLocation = exactDropLocation != null ? sanitizeString(labelFromLocation(exactDropLocation), MAX_LOCATION) : existingRide.exactDropLocation;
+    const nextRouteDescription = routeDescription != null
+      ? sanitizeString(routeDescription, MAX_LOCATION)
+      : existingRide.routeDescription;
 
     if (!nextStartLocation || !nextEndLocation) {
       return res.status(400).json({ success: false, error: 'startLocation and endLocation are required', code: 'MISSING_FIELDS' });
@@ -1088,6 +1124,7 @@ const updateRide = async (req, res) => {
       endLocation: nextEndLocation,
       exactLocation: nextExactLocation || null,
       exactDropLocation: nextExactDropLocation || null,
+      routeDescription: nextRouteDescription || null,
     };
 
     let routeCoordsChanged = false;
@@ -1157,8 +1194,23 @@ const updateRide = async (req, res) => {
         return res.status(400).json({ success: false, error: 'totalSeats must be at least 1', code: 'INVALID_TOTAL_SEATS' });
       }
       const currentAvailable = Number(existingRide.availableSeats ?? existingRide.totalSeats ?? parsedSeats);
+      const reservedSeats = Math.max(
+        0,
+        Number(existingRide.totalSeats ?? parsedSeats) - currentAvailable,
+      );
+      if (parsedSeats < reservedSeats) {
+        return res.status(400).json({
+          success: false,
+          error: `totalSeats cannot be less than ${reservedSeats} already booked seat(s)`,
+          code: 'SEATS_BELOW_BOOKED_COUNT',
+        });
+      }
       updatePayload.totalSeats = parsedSeats;
       updatePayload.availableSeats = Math.max(0, Math.min(currentAvailable, parsedSeats));
+      updatePayload.full = updatePayload.availableSeats <= 0;
+      if (updatePayload.full && existingRide.status === RIDE_STATUS.ACTIVE) {
+        updatePayload.status = RIDE_STATUS.FILLED;
+      }
     }
 
     if (rideType != null) {
@@ -1389,5 +1441,6 @@ module.exports = {
   getCaptainStats,
   calculateRouteProximityMeters,
   buildRideRouteSummary,
+  routeMatchScore,
   notifyCaptainsAboutRequest,
 };

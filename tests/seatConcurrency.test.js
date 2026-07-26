@@ -30,3 +30,16 @@ test('seat update prevents overbooking and caps released seats', () => {
   );
   assert.equal(released.available, 2);
 });
+
+test('three confirmed bookings consume every seat exactly once', () => {
+  let ride = { totalSeats: 3, availableSeats: 3 };
+
+  ride = { ...ride, availableSeats: seatUpdateFromRide(ride, -1).available };
+  assert.equal(ride.availableSeats, 2);
+  ride = { ...ride, availableSeats: seatUpdateFromRide(ride, -1).available };
+  assert.equal(ride.availableSeats, 1);
+  ride = { ...ride, availableSeats: seatUpdateFromRide(ride, -1).available };
+  assert.equal(ride.availableSeats, 0);
+
+  assert.throws(() => seatUpdateFromRide(ride, -1), /Ride is full/);
+});

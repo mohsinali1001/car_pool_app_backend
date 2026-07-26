@@ -24,10 +24,15 @@ if (!process.env.FIREBASE_PROJECT_ID || !process.env.FIREBASE_PRIVATE_KEY || !pr
     try {
         // Initialize Firebase only if not already initialized
         if (!admin.apps.length) {
+            const privateKey = String(process.env.FIREBASE_PRIVATE_KEY)
+                .trim()
+                .replace(/^['"]|['"]$/g, '')
+                .replace(/\\n/g, '\n')
+                .replace(/\r/g, '');
             admin.initializeApp({
                 credential: admin.credential.cert({
                     projectId: process.env.FIREBASE_PROJECT_ID,
-                    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+                    privateKey,
                     clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
                 }),
             });

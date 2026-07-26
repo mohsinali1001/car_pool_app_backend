@@ -20,6 +20,7 @@ router.patch('/status', verifyToken, updateOnlineStatus);
 
 router.patch('/profile/captain', verifyToken, async (req, res) => {
   const { db } = require('../config/firebase');
+  const { pushToUser } = require('../utils/notificationHelper');
   const {
     phone,
     gender,
@@ -77,9 +78,9 @@ router.patch('/profile/captain', verifyToken, async (req, res) => {
       captainVerificationStatus: lockedStatus
         ? existingStatus
         : captainVerificationStatus || existingStatus || (hasVehicleInfo ? 'pending_verification' : 'unverified'),
-      isVerified: false,
       updatedAt: new Date().toISOString(),
     };
+    updateData.isVerified = updateData.captainVerificationStatus === 'verified';
 
     const setIfPresent = (key, value, normalize = (v) => v) => {
       if (value !== undefined) {
@@ -104,6 +105,18 @@ router.patch('/profile/captain', verifyToken, async (req, res) => {
     }
 
     await userRef.set(updateData, { merge: true });
+
+    if (
+      existingStatus !== 'verified' &&
+      updateData.captainVerificationStatus === 'verified'
+    ) {
+      await pushToUser(req.user.uid, {
+        title: 'Documents verified',
+        body: 'Your captain documents are verified. Open the app and start using ShareWay.',
+        type: 'captain_verified',
+        data: { screen: 'home' },
+      });
+    }
 
     return res.json({
       success: true,

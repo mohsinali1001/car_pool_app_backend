@@ -11,9 +11,11 @@ const HIGH_PRIORITY_TYPES = new Set([
   'new_ride',
   'passenger_boarded',
   'customer_request',
+  'customer_ride_request',
   'customer_offer',
   'customer_counter',
   'customer_request_accepted',
+  'captain_verified',
 ]);
 
 async function saveInAppNotification(userId, { title, body, type, data }) {
@@ -68,7 +70,7 @@ async function pushToUser(userId, { title, body, type, data }) {
         priority: isHighPriority ? 'high' : 'normal',
         notification: {
           sound: 'default',
-          channelId: 'carpool_requests',
+          channelId: 'shareway_updates',
         },
       },
       apns: {

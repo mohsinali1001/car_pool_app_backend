@@ -1,5 +1,6 @@
 const { db } = require('../config/firebase');
 const { CAPTAIN_STARTER_BALANCE } = require('../utils/walletHelper');
+const { pushToUser } = require('../utils/notificationHelper');
 
 const ALLOWED_USER_FIELDS = [
   'name',
@@ -180,6 +181,18 @@ const syncUser = async (req, res) => {
       if (role === 'captain') {
         await ensureCaptainWallet(uid);
       }
+
+      if (
+        existing.captainVerificationStatus !== 'verified' &&
+        updates.captainVerificationStatus === 'verified'
+      ) {
+        await pushToUser(uid, {
+          title: 'Documents verified',
+          body: 'Your captain documents are verified. Open the app and start using ShareWay.',
+          type: 'captain_verified',
+          data: { screen: 'home' },
+        });
+      }
     }
 
     const updated = await userRef.get();
@@ -284,6 +297,18 @@ const updateProfile = async (req, res) => {
     const role = updates.role || snap.data().role;
     if (role === 'captain') {
       await ensureCaptainWallet(uid);
+    }
+
+    if (
+      existing.captainVerificationStatus !== 'verified' &&
+      updates.captainVerificationStatus === 'verified'
+    ) {
+      await pushToUser(uid, {
+        title: 'Documents verified',
+        body: 'Your captain documents are verified. Open the app and start using ShareWay.',
+        type: 'captain_verified',
+        data: { screen: 'home' },
+      });
     }
 
     const updated = await userRef.get();

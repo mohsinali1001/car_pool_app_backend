@@ -19,23 +19,28 @@ function haversineMeters(lat1, lng1, lat2, lng2) {
 
 // Decodes a Google/OSRM encoded polyline string into [{lat, lng}, ...]
 function decodePolyline(encoded) {
-  let index = 0, lat = 0, lng = 0;
+  let index = 0;
+  let lat = 0;
+  let lng = 0;
   const points = [];
   while (index < encoded.length) {
-    let result = 1, shift = 0, b;
+    let result = 0;
+    let shift = 0;
+    let b;
     do {
-      b = encoded.charCodeAt(index++) - 63 - 1;
-      result += b << shift;
+      b = encoded.charCodeAt(index++) - 63;
+      result |= (b & 0x1f) << shift;
       shift += 5;
-    } while (b >= 0x1f);
+    } while (b >= 0x20);
     lat += (result & 1) ? ~(result >> 1) : (result >> 1);
 
-    result = 1; shift = 0;
+    result = 0;
+    shift = 0;
     do {
-      b = encoded.charCodeAt(index++) - 63 - 1;
-      result += b << shift;
+      b = encoded.charCodeAt(index++) - 63;
+      result |= (b & 0x1f) << shift;
       shift += 5;
-    } while (b >= 0x1f);
+    } while (b >= 0x20);
     lng += (result & 1) ? ~(result >> 1) : (result >> 1);
 
     points.push({ lat: lat * 1e-5, lng: lng * 1e-5 });
